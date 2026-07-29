@@ -245,5 +245,94 @@ class TestFetchUrl(unittest.TestCase):
         self.assertEqual(len(pairs), 1)
         self.assertTrue(numeric.conversion_plausible(pairs[0]))
 
+
+class TestPendingEvents(unittest.TestCase):
+    """予定日の到来をコード側で検知する"""
+
+    def setUp(self):
+        import datetime
+        self.today = datetime.date(2026, 7, 29)
+
+    def test_当日の予定を警告する(self):
+        f = [{"kind": "date", "raw": "29日",
+              "context": "SKハイニックスが29日に第2四半期決算の発表を控える中"}]
+        w = numeric.pending_event_warnings(f, self.today)
+        self.assertEqual(len(w), 1)
+        self.assertIn("本日", w[0])
+
+    def test_未来の予定は警告しない(self):
+        f = [{"kind": "date", "raw": "2026年8月15日", "context": "8月15日に発表予定"}]
+        self.assertEqual(numeric.pending_event_warnings(f, self.today), [])
+
+    def test_予定を示す語がなければ警告しない(self):
+        f = [{"kind": "date", "raw": "27日", "context": "27日の終値は143.020"}]
+        self.assertEqual(numeric.pending_event_warnings(f, self.today), [])
+
+    def test_数値エントリは対象外(self):
+        f = [{"kind": "number", "raw": "-7.47%", "context": "発表"}]
+        self.assertEqual(numeric.pending_event_warnings(f, self.today), [])
+
+
+class TestParseAction(unittest.TestCase):
+    """
+    DONE のパース。実行 36dee1d5 で、書式そのものに言及した文
+    （「最終回答を『DONE: 』形式で再構成します」）にヒットし、
+    本文が「」形式で再構成します…」から始まる壊れた回答になっていた。
+    """
+
+    def setUp(self):
+        import types
+        if "langchain_openai" not in sys.modules:
+            m = types.ModuleType("langchain_openai")
+            m.ChatOpenAI = object
+            sys.modules["langchain_openai"] = m
+        if "langgraph.graph" not in sys.modules:
+            lg = types.ModuleType("langgraph")
+            lgg = types.ModuleType("langgraph.graph")
+
+            class _SG:
+                def __init__(self, *a, **k): pass
+                def add_node(self, *a, **k): pass
+                def set_entry_point(self, *a, **k): pass
+                def add_conditional_edges(self, *a, **k): pass
+                def compile(self, *a, **k): return object()
+
+            lgg.StateGraph = _SG
+            lgg.END = "END"
+            sys.modules["langgraph"] = lg
+            sys.modules["langgraph.graph"] = lgg
+        import graph
+        self.parse = graph.parse_action
+
+    def test_行頭のDONEを本文とする(self):
+        r = self.parse("THOUGHT: まとめる\nDONE: 最終結果です。")
+        self.assertEqual(r["type"], "done")
+        self.assertEqual(r["content"], "最終結果です。")
+
+    def test_書式への言及を本文と誤認しない(self):
+        text = ("THOUGHT: 最終回答を「DONE: 」形式で再構成します。\n"
+                "ACTION: DONE\n"
+                "THOUGHT: SKハイニックスの調査結果を報告します。")
+        r = self.parse(text)
+        self.assertEqual(r["type"], "done")
+        self.assertFalse(r["content"].startswith("」形式"),
+                         f"書式への言及を拾っている: {r['content'][:30]}")
+        self.assertTrue(r["content"].startswith("SKハイニックス"))
+
+    def test_ACTION_DONE形式を受け付ける(self):
+        r = self.parse("THOUGHT: まとめる\nACTION: DONE\nTHOUGHT: 結果です。")
+        self.assertEqual(r["type"], "done")
+        self.assertEqual(r["content"], "結果です。")
+
+    def test_ツール呼び出しは従来どおり(self):
+        r = self.parse("THOUGHT: 調べる\nACTION: web_search(SKハイニックス 決算)")
+        self.assertEqual(r["type"], "tool")
+        self.assertEqual(r["name"], "web_search")
+        self.assertEqual(r["arg"], "SKハイニックス 決算")
+
+    def test_形式不明はunknownのまま(self):
+        r = self.parse("なにも書式に従っていない文章です。")
+        self.assertEqual(r["type"], "unknown")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

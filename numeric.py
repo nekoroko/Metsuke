@@ -202,3 +202,61 @@ def format_findings(findings: list[dict], max_items: int = 40) -> str:
         src = f.get("source", "")
         lines.append(f"- {f['raw']}（{ctx}）" + (f" ／ {src}" if src else ""))
     return "\n".join(lines)
+
+
+# 「◯日に発表」等、予定を示す文脈を判定するための語
+PENDING_EVENT_WORDS = ("発表", "予定", "控え", "見込み", "公表", "リリース")
+
+
+def _resolve_date(raw: str, today):
+    """
+    「29日」「7月29日」「2026年7月29日」を日付へ解決する。
+    年・月が省略されている場合は today のものを補う（推測であることは
+    呼び出し側で扱う）。解決できなければ None。
+    """
+    import datetime as _dt
+
+    m = DATE_RE.fullmatch(raw)
+    if not m:
+        return None
+    try:
+        return _dt.date(
+            int(m.group("year")) if m.group("year") else today.year,
+            int(m.group("month")) if m.group("month") else today.month,
+            int(m.group("day")),
+        )
+    except ValueError:
+        return None
+
+
+def pending_event_warnings(findings: list, today=None) -> list[str]:
+    """
+    台帳の日付のうち、「発表予定」等の文脈を持ち、その日が今日以前に
+    到達しているものを警告として返す。
+
+    予想値を確定値のように扱う事故は、予定日が到来していることに
+    気づかないまま起きる。実測では、決算発表当日の未明に実行しながら
+    予想値をそのまま結論にしていた。LLMの注意力に頼らず、日付の比較は
+    コード側で行う。
+    """
+    import datetime as _dt
+
+    today = today or _dt.date.today()
+    warnings = []
+    seen = set()
+    for f in findings or []:
+        if f.get("kind") != "date":
+            continue
+        context = f.get("context", "")
+        if not any(w in context for w in PENDING_EVENT_WORDS):
+            continue
+        d = _resolve_date(f.get("raw", ""), today)
+        if d is None or d > today:
+            continue
+        key = (f["raw"], context[:20])
+        if key in seen:
+            continue
+        seen.add(key)
+        when = "本日" if d == today else f"{d.isoformat()}（すでに経過）"
+        warnings.append(f"{f['raw']} は {when} です — 「{context[:50]}」")
+    return warnings

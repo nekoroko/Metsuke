@@ -8,7 +8,9 @@ from sandbox import execute_in_sandbox, PROFILE_AGENT_CODE
 from reviewers import (
     dispatch_reviewers, run_reviewers, aggregate_results, numeric_checker,
 )
-from numeric import collect_from_text, merge_findings, format_findings
+from numeric import (
+    collect_from_text, merge_findings, format_findings, pending_event_warnings,
+)
 from datetime import datetime
 
 
@@ -24,12 +26,29 @@ def _findings_section(findings: list) -> str:
     body = format_findings(findings or [])
     if not body:
         return ""
-    return (
+
+    section = (
         "## これまでに取得した数値・日付\n"
         "以下は、これまでの検索結果から機械的に抜き出したものです。原文のままなので、\n"
         "回答に書くときはこの表記を変えないでください（単位も変換しないこと）。\n"
         f"{body}\n\n"
     )
+
+    # 予定日が到来しているイベントは、日付比較をコード側で行って明示する。
+    # 「本日発表予定」に気づかず予想値を確定値のように書く事故を防ぐ。
+    warnings = pending_event_warnings(findings or [])
+    if warnings:
+        section += (
+            "## 注意: 予定日が到来しているイベントがあります\n"
+            + "\n".join(f"- {w}" for w in warnings)
+            + "\n"
+            "これらは「予定」として書かれた情報ですが、予定日はすでに到来しています。\n"
+            "DONEを出す前に「（対象名） 速報」「（対象名） 発表」等で**必ず再検索**し、\n"
+            "実際に発表済みか、実績値が出ていないかを確認してください。\n"
+            "確認できない場合は、予想値であることと「◯日発表予定（未確認）」である旨を\n"
+            "両方明記してください。予想値を実績値のように書いてはいけません。\n\n"
+        )
+    return section
 
 
 def build_system_prompt(step_count: int = 0, max_steps: int = 10,
@@ -134,6 +153,26 @@ def build_system_prompt(step_count: int = 0, max_steps: int = 10,
         "  ウォンと円は10倍程度の差があり、同じ値になることはない。\n"
         "- 検索結果に「◯日に発表」等の予定があり、その日が今日以前または数日以内の\n"
         "  場合、予想値を書くときは「◯日発表予定のため未確定」と必ず注記すること。\n\n"
+        "## 数値には出所と種別を必ず付ける\n"
+        "- すべての数値に **[実績]** か **[予想]** のどちらかを付けること。\n"
+        "  どちらか判断できない場合は **[種別不明]** と書くこと。省略しないこと。\n"
+        "  例: 売上高 84.1兆ウォン [予想]（証券14社コンセンサス、2026年7月29日発表予定）\n"
+        "- 「コンセンサス」「見通し」「見込み」「予想」と書かれた数値は必ず [予想] である。\n"
+        "  これを実績のように書くことは重大な誤りである。\n"
+        "- **株価・騰落率には必ず「いつ時点か」と「どの市場か」を併記すること。**\n"
+        "  例: -8.81%（NASDAQ上場ADR SKHY、2026年7月28日終値）\n"
+        "  時点が分からない株価データは、「時点不明」と明記するか、採用しないこと。\n"
+        "- **同じ企業が複数の市場に上場している場合、市場と通貨を分けて書くこと。**\n"
+        "  例: 韓国取引所 000660.KS（ウォン建て）と NASDAQ ADR SKHY（ドル建て）は別物である。\n"
+        "  異なる市場・通貨の数値を、断りなく同じ項目に並べてはいけない。\n"
+        "- 出典を書くときは、その数値を実際に取得したページを書くこと。\n"
+        "  上の一覧には数値ごとの取得元が併記されているので、それと食い違わせないこと。\n\n"
+        "## 決算・業績を調べるときの手順\n"
+        "「決算」「業績」を扱うタスクでは、予想と実績の両方を探すこと。\n"
+        "「（対象名） 決算」だけで終わらせず、**「（対象名） 決算 実績」または\n"
+        "「（対象名） 決算 発表」でも最低1回は検索する**こと。\n"
+        "「決算」だけで検索すると発表前のプレビュー記事（予想）ばかりが集まり、\n"
+        "予想値を実績値と取り違える原因になる。\n\n"
         "## DONEを出す前の点検\n"
         "「これまでに取得した数値・日付」の一覧を上から1件ずつ確認し、\n"
         "タスクの問いに関係するものを回答に含めたか点検すること。\n"
@@ -192,13 +231,43 @@ MAX_ASSISTANT_LEN = 800
 MAX_RESULT_LEN = 1000
 
 
+def _parse_done(text: str) -> str:
+    """
+    DONE の本文を取り出す。
+
+    以前は `DONE:` をテキスト中のどこからでも拾っていたため、
+    「最終回答を『DONE: 』形式で再構成します」のように**書式そのものに
+    言及した文**にヒットし、本文が「」形式で再構成します…」から始まる
+    壊れた回答になっていた。しかも直前のフォーマット警告メッセージが
+    「'DONE: ' と書いてください」と指示しているため、モデルにその文言を
+    書かせて自分で踏む形になっていた。
+
+    そのため、まず行頭の DONE: だけを見る。あわせて、実際に頻出する
+    `ACTION: DONE` 形式もフォールバックとして受け付ける
+    （これを弾くと1ループ丸ごと無駄になるうえ、再試行でも同じ形式が
+     出てくることが実測で確認されている）。
+    """
+    m = re.search(r"^[ \t　]*DONE:[ \t　]*", text, re.MULTILINE)
+    if m:
+        content = text[m.end():].strip()
+        if content:
+            return content
+
+    m = re.search(r"^[ \t　]*ACTION:[ \t　]*DONE[ \t　]*$", text, re.MULTILINE)
+    if m:
+        rest = text[m.end():].strip()
+        rest = re.sub(r"^THOUGHT:[ \t　]*", "", rest)
+        if rest:
+            return rest
+
+    return ""
+
+
 def parse_action(text: str) -> dict:
     """LLMの出力（自由記述テキスト）からアクションを解析する。"""
-    done_match = re.search(r"DONE:\s*(.+)", text, re.DOTALL)
-    if done_match:
-        content = done_match.group(1).strip()
-        if content:
-            return {"type": "done", "content": content}
+    done_content = _parse_done(text)
+    if done_content:
+        return {"type": "done", "content": done_content}
 
     if "generate_code" in text.lower():
         code_match = re.search(r"```python\s*\n(.+?)```", text, re.DOTALL)
@@ -438,9 +507,11 @@ def react_step(state: AgentState) -> AgentState:
 
     else:
         new_history.append({"role": "result", "content": (
-            "回答形式が正しくありません。必ず 'THOUGHT: ' または 'DONE: ' という"
-            "文字列を行の先頭に含めてください。最終回答を書く場合は、"
-            "本文の前に必ず 'DONE: ' と書いてから続けてください。"
+            "回答形式を認識できませんでした。\n"
+            "最終回答を書く場合は、行の先頭を DONE から始め、コロンに続けて"
+            "本文を書いてください。\n"
+            "ツールを使う場合は ACTION の行にツール名と丸括弧の引数を書いてください。\n"
+            "書式の説明を本文中で引用せず、実際にその書式で書いてください。"
         )})
         return {
             **state,
