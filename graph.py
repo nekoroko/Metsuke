@@ -10,6 +10,7 @@ from reviewers import (
 )
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
+    claims_absence, unused_numbers,
 )
 from datetime import datetime
 
@@ -167,6 +168,20 @@ def build_system_prompt(step_count: int = 0, max_steps: int = 10,
         "  異なる市場・通貨の数値を、断りなく同じ項目に並べてはいけない。\n"
         "- 出典を書くときは、その数値を実際に取得したページを書くこと。\n"
         "  上の一覧には数値ごとの取得元が併記されているので、それと食い違わせないこと。\n\n"
+        "## 出典の選び方\n"
+        "- 決算・業績・財務の数値は、**企業の公式発表（IR）や主要な経済メディア**を\n"
+        "  優先すること。株価情報サイトや集計サイトのスニペットだけを根拠にしないこと。\n"
+        "- 集計サイト（株価ポータル、まとめサイト等）の数値しか得られていない場合は、\n"
+        "  「一次情報未確認」と明記すること。\n"
+        "- アナリスト評価・センチメントスコア・掲示板の強気弱気比率などを引用する場合は、\n"
+        "  **「個人投資家向けサイトの集計値（参考値）」であることを必ず併記**すること。\n"
+        "  これらは公式の格付けや専門機関の評価とは別物である。\n\n"
+        "## 情報が足りないとき\n"
+        "「直近1週間」「最近」等の条件を満たす情報が集まらなかった場合、\n"
+        "「見つかりませんでした」と書く前に、**期間を明示したクエリで最低1回は再検索**する\n"
+        "こと（例:「（対象名） 株価 今週」「（対象名） 7月28日」）。\n"
+        "再検索しても不足する場合に限り、何がどこまで確認できたのかを具体的に書くこと。\n"
+        "「情報は限定的でした」とだけ書いて終えないこと。\n\n"
         "## 決算・業績を調べるときの手順\n"
         "「決算」「業績」を扱うタスクでは、予想と実績の両方を探すこと。\n"
         "「（対象名） 決算」だけで終わらせず、**「（対象名） 決算 実績」または\n"
@@ -663,17 +678,39 @@ def correct_step(state: AgentState) -> AgentState:
             "correction_count": state.get("correction_count", 0) + 1,
         }
 
-    if result["verdict"] == "OK":
+    issues = list(result["issues"])
+    instruction = result["instruction"]
+
+    # 「情報が見つかりませんでした」と書きながら、取得済みの数値を
+    # 使っていないケースを拾う。実測で2回続けて発生している
+    # （株価の下落率が台帳にあるのに「値動きは確認できず」と書いていた）。
+    if claims_absence(done_content):
+        unused = unused_numbers(done_content, state.get("findings", []))
+        if unused:
+            listed = "、".join(f"{u['raw']}（{u.get('context', '')[:30]}）" for u in unused[:5])
+            issues.append(
+                "回答に「情報が得られなかった」旨の記述がありますが、"
+                f"取得済みで未使用の数値があります: {listed}"
+            )
+            instruction = (
+                (instruction + "\n") if instruction else ""
+            ) + (
+                "これらの数値がタスクの問いに答えるものかを確認し、"
+                "該当するなら回答へ反映してください。無関係なら、"
+                "何が不足しているのかをより具体的に書いてください。"
+            )
+
+    if not issues:
         return {
             **state,
             "status": "needs_revision",
             "correction_count": state.get("correction_count", 0) + 1,
         }
 
-    feedback = "（自動訂正チェック）最終回答の数値に問題があります。\n"
-    feedback += "\n".join(f"- {i}" for i in result["issues"])
-    if result["instruction"]:
-        feedback += f"\n\n{result['instruction']}"
+    feedback = "（自動訂正チェック）最終回答に問題があります。\n"
+    feedback += "\n".join(f"- {i}" for i in issues)
+    if instruction:
+        feedback += f"\n\n{instruction}"
     feedback += "\n訂正した上で、再度DONEで最終回答を出してください。"
 
     return {

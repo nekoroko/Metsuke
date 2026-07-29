@@ -1,5 +1,7 @@
 # executor.py — ツール実行（Type 1）+ エージェント実行（Type 2）
 import os
+from datetime import datetime
+
 from db import add_execution, finish_execution, update_execution_progress
 from sandbox import (
     execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
@@ -7,6 +9,47 @@ from sandbox import (
 from state import make_initial_state
 
 WORKSPACE = "/tmp/agent_workspace"
+
+
+def _extract_done_text(history: list) -> str:
+    """
+    履歴から最終回答を取り出す。
+
+    行頭の DONE: を優先し、無ければ ACTION: DONE 形式も受け付ける。
+    graph._parse_done と同じ規則にそろえてある。単純に "DONE:" を
+    split すると、書式そのものに言及した文にヒットして本文が壊れる。
+    """
+    import re as _re
+
+    for entry in reversed(history):
+        if entry.get("role") != "assistant":
+            continue
+        content = entry.get("content", "")
+        m = _re.search(r"^[ \t　]*DONE:[ \t　]*", content, _re.MULTILINE)
+        if m:
+            body = content[m.end():].strip()
+            if body:
+                return body
+        m = _re.search(r"^[ \t　]*ACTION:[ \t　]*DONE[ \t　]*$", content, _re.MULTILINE)
+        if m:
+            body = _re.sub(r"^THOUGHT:[ \t　]*", "", content[m.end():].strip())
+            if body:
+                return body
+    return ""
+
+
+def _stamp_result(text: str) -> str:
+    """
+    レポートの先頭に基準時刻を付ける。
+
+    調査結果は時間が経てば陳腐化する（株価・決算・ニュース等）。
+    読み手が「いつ時点の話か」を判断できるよう、機械的に付与する。
+    エージェント自身に書かせると付け忘れるため、コード側で行う。
+    """
+    if not text or not text.strip():
+        return text
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"_本レポートは {stamp} 時点で取得した情報に基づきます。_\n\n{text}"
 
 
 def run_tool(tool_id: str, tool_name: str, code: str,
@@ -58,10 +101,7 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
         # 最終結果を抽出
         result_text = ""
         if final_state["status"] == "done":
-            for entry in reversed(final_state["history"]):
-                if entry["role"] == "assistant" and "DONE:" in entry["content"]:
-                    result_text = entry["content"].split("DONE:")[1].strip()
-                    break
+            result_text = _stamp_result(_extract_done_text(final_state["history"]))
         elif final_state["status"] == "error":
             result_text = f"ステップ上限（{final_state['max_steps']}）に到達"
 
@@ -151,10 +191,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None):
         # 最終結果を抽出
         result_text = ""
         if final_state["status"] == "done":
-            for entry in reversed(final_state["history"]):
-                if entry["role"] == "assistant" and "DONE:" in entry["content"]:
-                    result_text = entry["content"].split("DONE:")[1].strip()
-                    break
+            result_text = _stamp_result(_extract_done_text(final_state["history"]))
         elif final_state["status"] == "error":
             result_text = f"ステップ上限（{final_state['max_steps']}）に到達"
 
@@ -253,24 +290,19 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
 
         # 最終的にfinal_stateからDONEを抽出してyieldする
         if final_state and final_state["status"] == "done":
-            for entry in reversed(final_state["history"]):
-                if entry["role"] == "assistant" and "DONE:" in entry["content"]:
-                    done_text = entry["content"].split("DONE:")[1].strip()
-                    yield {
-                        "step": final_state["step_count"],
-                        "status": "done",
-                        "role": "final",
-                        "done": done_text,
-                    }
-                    break
+            done_text = _extract_done_text(final_state["history"])
+            if done_text:
+                yield {
+                    "step": final_state["step_count"],
+                    "status": "done",
+                    "role": "final",
+                    "done": _stamp_result(done_text),
+                }
 
         if final_state:
             result_text = ""
             if final_state["status"] == "done":
-                for entry in reversed(final_state["history"]):
-                    if entry["role"] == "assistant" and "DONE:" in entry["content"]:
-                        result_text = entry["content"].split("DONE:")[1].strip()
-                        break
+                result_text = _stamp_result(_extract_done_text(final_state["history"]))
 
             finish_execution(
                 exec_id, final_state["status"],

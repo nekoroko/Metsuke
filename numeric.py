@@ -260,3 +260,40 @@ def pending_event_warnings(findings: list, today=None) -> list[str]:
         when = "本日" if d == today else f"{d.isoformat()}（すでに経過）"
         warnings.append(f"{f['raw']} は {when} です — 「{context[:50]}」")
     return warnings
+
+
+# 「情報が得られなかった」と述べていることを検知するための語
+ABSENCE_PHRASES = (
+    "見つかりません", "見つからず", "見つかりませんでした",
+    "確認できません", "確認できませんでした", "得られません", "得られませんでした",
+    "限定的", "情報がありません", "データはありません", "不明です",
+)
+
+
+def claims_absence(text: str) -> bool:
+    """回答が「情報が得られなかった」と述べているか"""
+    return any(p in (text or "") for p in ABSENCE_PHRASES)
+
+
+def unused_numbers(answer: str, findings: list) -> list[dict]:
+    """
+    台帳にあるのに回答で使われていない数値を返す。
+
+    「情報が見つかりませんでした」と書きながら、実は取得済みの数値
+    （株価の下落率など）を使っていない、という取りこぼしを検出するために使う。
+    実測で2回続けて発生している。
+
+    照合は文字列一致ではなく値と単位で行う。回答が「約84兆ウォン」と
+    丸めて書いていても、台帳の「84兆1693億ウォン」を使ったとみなす。
+    """
+    used = extract_numbers(answer or "")
+    out = []
+    for f in findings or []:
+        if f.get("kind") != "number":
+            continue
+        parsed = extract_numbers(f.get("raw", ""))
+        if not parsed:
+            continue
+        if not matches_any(parsed[0], used):
+            out.append(f)
+    return out

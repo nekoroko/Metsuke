@@ -334,5 +334,68 @@ class TestParseAction(unittest.TestCase):
         r = self.parse("なにも書式に従っていない文章です。")
         self.assertEqual(r["type"], "unknown")
 
+
+class TestUnusedFindings(unittest.TestCase):
+    """取得済みなのに使われていない数値の検出"""
+
+    def setUp(self):
+        self.findings = [
+            {"kind": "number", "raw": "-7.47%", "context": "終値 07/27"},
+            {"kind": "number", "raw": "83兆ウォン", "context": "コンセンサス"},
+            {"kind": "date", "raw": "29日", "context": "発表"},
+        ]
+
+    def test_情報なしの記述を検知する(self):
+        self.assertTrue(numeric.claims_absence("値動きは確認できませんでした。"))
+        self.assertFalse(numeric.claims_absence("値動きは-7.47%でした。"))
+
+    def test_未使用の数値を返す(self):
+        ans = "売上高は83兆ウォンの見込みです。値動きは見つかりませんでした。"
+        got = [f["raw"] for f in numeric.unused_numbers(ans, self.findings)]
+        self.assertEqual(got, ["-7.47%"])
+
+    def test_丸め表記でも使用済みとみなす(self):
+        ans = "売上高は約83兆ウォンです。株価は-7.47%でした。"
+        self.assertEqual(numeric.unused_numbers(ans, self.findings), [])
+
+    def test_日付は対象外(self):
+        ans = "情報が見つかりませんでした。-7.47%、83兆ウォン。"
+        got = [f["raw"] for f in numeric.unused_numbers(ans, self.findings)]
+        self.assertNotIn("29日", got)
+
+
+class TestExecutorHelpers(unittest.TestCase):
+    """executor の最終回答の取り出しと時点表示"""
+
+    def setUp(self):
+        import types
+        for name in ("langchain_openai",):
+            if name not in sys.modules:
+                m = types.ModuleType(name)
+                m.ChatOpenAI = object
+                sys.modules[name] = m
+        import executor
+        self.executor = executor
+
+    def test_書式への言及を本文と誤認しない(self):
+        history = [{"role": "assistant", "content": (
+            "THOUGHT: 最終回答を「DONE: 」形式で再構成します。\n"
+            "ACTION: DONE\n"
+            "THOUGHT: SKハイニックスの調査結果です。")}]
+        got = self.executor._extract_done_text(history)
+        self.assertTrue(got.startswith("SKハイニックス"), got[:30])
+
+    def test_行頭のDONEを優先する(self):
+        history = [{"role": "assistant", "content": "THOUGHT: x\nDONE: 本文です。"}]
+        self.assertEqual(self.executor._extract_done_text(history), "本文です。")
+
+    def test_時点表示を先頭に付ける(self):
+        out = self.executor._stamp_result("本文")
+        self.assertIn("時点で取得した情報に基づきます", out.splitlines()[0])
+        self.assertTrue(out.rstrip().endswith("本文"))
+
+    def test_空文字には何も付けない(self):
+        self.assertEqual(self.executor._stamp_result(""), "")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
