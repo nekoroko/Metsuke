@@ -6,6 +6,8 @@ langgraph
 streamlit
 apscheduler
 
-# ツール実行時ランタイム（AI生成ツールが使うライブラリ）。
-# サンドボックスイメージ（Containerfile）と同じ集合をホストにも入れる。
--r requirements-tools.txt
+# エージェントの web_search ツール（tools.py）がホスト上で直接使う。
+# AI生成ツールが使うライブラリは requirements-tools.txt 側に定義されており、
+# そちらはサンドボックスイメージにのみインストールされる
+# （生成コードはすべてコンテナ内で実行されるため、ホストには不要）。
+ddgs

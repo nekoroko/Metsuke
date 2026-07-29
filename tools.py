@@ -2,27 +2,12 @@
 import os
 import json
 import sqlite3
-import subprocess
-import tempfile
 import urllib.request
 import urllib.parse
 from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
+from settings_store import read_settings as _read_settings
 
 WORKSPACE = "/tmp/agent_workspace"
-
-
-def _read_settings() -> dict:
-    """agent-studioのDBから設定を読み込む。失敗時は空dict。"""
-    try:
-        if not os.path.exists(AGENT_STUDIO_DB):
-            return {}
-        conn = sqlite3.connect(AGENT_STUDIO_DB)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT key, value FROM settings").fetchall()
-        conn.close()
-        return {r["key"]: r["value"] for r in rows}
-    except Exception:
-        return {}
 
 
 def read_file(path: str) -> str:
@@ -76,24 +61,23 @@ def list_directory(path: str = "") -> str:
 
 
 def run_shell(command: str) -> str:
-    """シェルコマンドを実行する（VM上で直接実行）"""
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=WORKSPACE,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
-        return output[:2000] if output else "(出力なし)"
-    except subprocess.TimeoutExpired:
-        return "エラー: タイムアウト（30秒）"
-    except Exception as e:
-        return f"エラー: {e}"
+    """
+    シェルコマンドをサンドボックス内で実行する。
+
+    以前はホスト上で直接実行しており、エージェントは generate_code の
+    Podman隔離を run_shell で回避できてしまっていた。全実行経路の
+    サンドボックス化に伴い、ここも通す。
+
+    エージェントが実行時に組み立てるコマンドはレビューを経ていないため、
+    通信は遮断する（PROFILE_AGENT_SHELL）。
+    """
+    from sandbox import execute_shell_in_sandbox, PROFILE_AGENT_SHELL
+
+    result = execute_shell_in_sandbox(command, **PROFILE_AGENT_SHELL)
+    output = result["stdout"]
+    if result["stderr"]:
+        output += f"\n[stderr]\n{result['stderr']}"
+    return output[:2000] if output.strip() else "(出力なし)"
 
 
 def fetch_url(url: str) -> str:
@@ -306,40 +290,30 @@ def run_saved_tool(tool_id: str) -> str:
         if row["status"] != "verified":
             return f"エラー: ツール '{row['name']}' (ID: {tool_id}) は未検証です。検証済みのツールのみ実行できます。"
 
-        os.makedirs(WORKSPACE, exist_ok=True)
+        # 検証済みツールは executor.run_tool と同じプロファイルで実行する
+        # （呼び出し元がUIかエージェントかで実行環境が変わらないようにする）
+        from sandbox import (
+            execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
+        )
 
-        with tempfile.NamedTemporaryFile(
-            mode='w', suffix='.py', delete=False,
-            encoding='utf-8', dir=WORKSPACE
-        ) as f:
-            f.write(row["code"])
-            path = f.name
+        result = execute_in_sandbox(
+            row["code"],
+            env=build_sandbox_env(),
+            **PROFILE_VERIFIED_TOOL,
+        )
 
-        try:
-            result = subprocess.run(
-                ["python3", path],
-                capture_output=True, text=True,
-                timeout=120, cwd=WORKSPACE,
-            )
-            output_parts = [f"[ツール '{row['name']}' 実行結果]"]
-            if result.returncode == 0:
-                output_parts.append("ステータス: 成功")
-                if result.stdout:
-                    output_parts.append(f"出力:\n{result.stdout}")
-                else:
-                    output_parts.append("（出力なし）")
-            else:
-                output_parts.append(f"ステータス: エラー (returncode={result.returncode})")
-                if result.stderr:
-                    output_parts.append(f"stderr:\n{result.stderr}")
-                if result.stdout:
-                    output_parts.append(f"stdout:\n{result.stdout}")
-            return "\n".join(output_parts)
-        finally:
-            os.unlink(path)
+        output_parts = [f"[ツール '{row['name']}' 実行結果]"]
+        if result["success"]:
+            output_parts.append("ステータス: 成功")
+            output_parts.append(f"出力:\n{result['stdout']}" if result["stdout"] else "（出力なし）")
+        else:
+            output_parts.append("ステータス: エラー")
+            if result["stderr"]:
+                output_parts.append(f"stderr:\n{result['stderr']}")
+            if result["stdout"]:
+                output_parts.append(f"stdout:\n{result['stdout']}")
+        return "\n".join(output_parts)
 
-    except subprocess.TimeoutExpired:
-        return f"エラー: ツール実行がタイムアウトしました（120秒）"
     except Exception as e:
         return f"エラー: {e}"
 

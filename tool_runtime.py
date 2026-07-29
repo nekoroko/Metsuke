@@ -11,14 +11,10 @@
 import hashlib
 import os
 import re
-import subprocess
-import sys
 
 from paths import BASE_DIR
 
 REQUIREMENTS_PATH = os.path.join(BASE_DIR, "requirements-tools.txt")
-
-INSTALL_TIMEOUT = 900
 
 
 def read_entries() -> list[dict]:
@@ -105,61 +101,11 @@ def write_raw(text: str) -> None:
     requirements-tools.txt を書き換える。
 
     設定をDBに持たせず、あくまでファイルを唯一の定義元とするのが要点。
-    Containerfile（COPY + pip install -r）と requirements.txt（-r）が
-    実ファイルを読むため、DBに持たせると定義元が二重化してしまう。
+    Containerfile が COPY + pip install -r で実ファイルを読むため、
+    DBに持たせると定義元が二重化してしまう。
     UIはこのファイルのエディタとして振る舞う。
     """
     if not text.endswith("\n"):
         text += "\n"
     with open(REQUIREMENTS_PATH, "w", encoding="utf-8") as f:
         f.write(text)
-
-
-def check_host_packages() -> list[dict]:
-    """
-    ホスト側（このアプリを動かしているvenv）に各パッケージが
-    インストール済みかどうかを調べる。
-
-    import名ではなく配布名で判定する（beautifulsoup4 は bs4 としてimportするため、
-    import名で見ると誤判定する）。importlib.metadata は配布名で引けるので、
-    この差を意識せずに済む。
-    """
-    from importlib import metadata
-
-    results = []
-    for e in read_entries():
-        try:
-            version = metadata.version(e["name"])
-            installed = True
-        except Exception:
-            version = ""
-            installed = False
-        results.append({"name": e["name"], "installed": installed, "version": version})
-    return results
-
-
-def install_to_host() -> dict:
-    """
-    requirements-tools.txt をホストのvenvにインストールする。
-
-    検証済みツール（Type1）は executor.run_tool が subprocess で
-    毎回新しい python3 を起動して実行するため、ここでインストールすれば
-    Streamlitを再起動しなくても次回のツール実行から反映される。
-
-    戻り値: {"ok": bool, "message": str}
-    """
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS_PATH],
-            capture_output=True, text=True, timeout=INSTALL_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "message": f"インストールがタイムアウトしました（{INSTALL_TIMEOUT}秒）"}
-    except Exception as e:
-        return {"ok": False, "message": f"インストールを実行できませんでした: {e}"}
-
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "")[-2000:]
-        return {"ok": False, "message": f"pip install に失敗しました。\n\n{detail}"}
-
-    return {"ok": True, "message": (result.stdout or "")[-2000:]}

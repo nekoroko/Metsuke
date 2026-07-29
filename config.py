@@ -22,11 +22,11 @@
 # コード内の定数は、設定値が空/不正な場合の最終フォールバックに過ぎない。
 
 import os
-import sqlite3
 import time
 import random
 from langchain_openai import ChatOpenAI
 from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
+from settings_store import read_settings as _read_settings
 
 FALLBACK_LOCAL_BASE_URL = "http://10.0.2.2:1234/v1"
 FALLBACK_LOCAL_MODEL = "gemma-4-12b-qat"
@@ -36,18 +36,6 @@ ABSOLUTE_FALLBACK_LOCAL_MAX_TOKENS = 3000
 ABSOLUTE_FALLBACK_API_MAX_TOKENS = 4000
 
 
-def _read_settings() -> dict:
-    """agent-studioのDBから設定を読み込む。失敗時は空dict。"""
-    try:
-        if not os.path.exists(AGENT_STUDIO_DB):
-            return {}
-        conn = sqlite3.connect(AGENT_STUDIO_DB)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT key, value FROM settings").fetchall()
-        conn.close()
-        return {r["key"]: r["value"] for r in rows}
-    except Exception:
-        return {}
 
 
 def _resolve_max_tokens(configured: str, absolute_fallback: int,

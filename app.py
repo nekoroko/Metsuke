@@ -1,6 +1,7 @@
 # app.py — AI Agent Studio
 import streamlit as st
 import json
+import os
 from db import (
     init_db,
     add_tool, get_tool, get_all_tools, get_verified_tools, update_tool, delete_tool,
@@ -15,10 +16,10 @@ from executor import (
 from ai_creator import generate_tool, fix_code
 from scheduler import start as start_scheduler, add_job, remove_job, run_agent_now
 from config import get_current_provider_info
-from sandbox import image_status as sandbox_image_status, ensure_sandbox_image
-from tool_runtime import (
-    read_raw, write_raw, format_for_prompt, check_host_packages, install_to_host,
+from sandbox import (
+    image_status as sandbox_image_status, ensure_sandbox_image, parse_mounts,
 )
+from tool_runtime import read_raw, write_raw, format_for_prompt
 import time
 
 # --- 初期化 ---
@@ -1020,40 +1021,49 @@ with tab_settings:
     st.markdown("**AIに提示される許可リスト（このファイルから自動生成）**")
     st.code(format_for_prompt(), language="text")
 
-    st.markdown("**ホスト側（検証済みツールの実行環境）の状態**")
     st.caption(
-        "検証済みツールはサンドボックスではなくホスト上で直接実行されるため、"
-        "こちらにもインストールが必要です。"
+        "ツールコードはすべてサンドボックス内で実行されるため、"
+        "ここで定義したライブラリをホスト側にインストールする必要はありません。"
     )
-    _host = check_host_packages()
-    _missing = [p["name"] for p in _host if not p["installed"]]
 
-    st.table([
-        {
-            "パッケージ": p["name"],
-            "状態": "✅ インストール済み" if p["installed"] else "❌ 未インストール",
-            "バージョン": p["version"] or "-",
-        }
-        for p in _host
-    ])
+    # ========== サンドボックスの追加マウント ==========
+    st.divider()
+    st.subheader("サンドボックスのファイルアクセス")
+    st.caption(
+        "ツール・エージェントのコード実行はすべてコンテナ内で行われます。"
+        f"既定で見えるのは作業ディレクトリ（{WORKSPACE}）だけなので、"
+        "ホスト上の他のファイル（ログ、CSV等）を扱う場合はここでマウントを指定します。"
+    )
 
-    if _missing:
-        st.warning(
-            f"未インストール: {', '.join(_missing)} — "
-            "このままだと、これらを使う検証済みツールはホスト実行時に "
-            "ModuleNotFoundError になります。"
-        )
-        if st.button("📥 ホストにインストール", key="libs_host_install"):
-            with st.spinner("pip install を実行中..."):
-                _r = install_to_host()
-            if _r["ok"]:
-                st.success(
-                    "インストールが完了しました。"
-                    "ツール実行は毎回新しいプロセスで動くため、再起動は不要です。"
-                )
-                st.rerun()
-            else:
-                st.error("インストールに失敗しました。")
-                st.code(_r["message"])
-    else:
-        st.success("必要なライブラリはすべてインストール済みです。")
+    _mounts_text = st.text_area(
+        "追加マウント",
+        value=current_settings.get("sandbox_extra_mounts", ""),
+        height=120,
+        placeholder="/var/log:/var/log:ro\n/home/user/data:/data:ro",
+        help="1行1マウント。「ホストのパス:コンテナ内のパス:ro または rw」形式。"
+             "コンテナ内パスとモードは省略可（省略時は同じパス・読み取り専用）。",
+        key="sandbox_mounts",
+    )
+
+    _parsed_mounts = parse_mounts(_mounts_text)
+    if _parsed_mounts:
+        st.table([
+            {"ホスト": h, "コンテナ内": c, "モード": "読み取り専用" if m == "ro" else "読み書き可"}
+            for h, c, m in _parsed_mounts
+        ])
+        _nonexistent = [h for h, _, _ in _parsed_mounts if not os.path.exists(h)]
+        if _nonexistent:
+            st.warning(f"ホスト上に存在しないパス: {', '.join(_nonexistent)}")
+        if any(m == "rw" for _, _, m in _parsed_mounts):
+            st.warning(
+                "書き込み可（rw）でマウントされたパスは、ツールのバグや"
+                "AIが生成したコードによって変更・削除される可能性があります。"
+                "必要な範囲に限定してください。"
+            )
+    elif _mounts_text.strip():
+        st.info("有効なマウント指定として認識された行がありません。")
+
+    if st.button("💾 マウント設定を保存", type="primary", key="mounts_save"):
+        set_settings({"sandbox_extra_mounts": _mounts_text})
+        st.success("保存しました。次回の実行から反映されます。")
+        st.rerun()

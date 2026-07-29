@@ -129,6 +129,10 @@ def init_db():
         #  実際に使える上限は異なるため。UIでは警告のみ表示する）。
         "local_max_output_tokens": "3000",
         "api_max_output_tokens": "4000",
+        # サンドボックスへの追加マウント（1行1マウント、host:container:ro|rw）。
+        # 全実行がコンテナ内で行われるため、作業ディレクトリ以外のホストファイルに
+        # 触るツールはここでマウントを明示する必要がある。
+        "sandbox_extra_mounts": "",
     }
     for k, v in defaults.items():
         conn.execute(

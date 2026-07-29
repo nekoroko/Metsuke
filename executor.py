@@ -1,75 +1,34 @@
 # executor.py — ツール実行（Type 1）+ エージェント実行（Type 2）
-import subprocess
-import tempfile
 import os
 from db import add_execution, finish_execution, update_execution_progress
-from sandbox import execute_in_sandbox
+from sandbox import (
+    execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
+)
 from state import make_initial_state
 
 WORKSPACE = "/tmp/agent_workspace"
 
 
-# サンドボックスに渡してよい設定キー → 環境変数名の対応表。
-#
-# 設定DB（agent_studio.db）には検索APIキーだけでなく、LLMプロバイダの
-# APIキー（api_key）も平文で同居している。DBそのものをコンテナに
-# マウントすると、未検証のAI生成コードに全プロバイダのキーを渡すことになる。
-# そのため「必要なキーだけを環境変数で個別に注入する」方式にしている。
-SANDBOX_ENV_KEYS = {
-    "tavily_api_key": "TAVILY_API_KEY",
-    "google_api_key": "GOOGLE_API_KEY",
-    "google_cse_id": "GOOGLE_CSE_ID",
-    "brave_api_key": "BRAVE_API_KEY",
-}
-
-
-def build_sandbox_env() -> dict:
-    """
-    サンドボックスに渡す環境変数を組み立てる。
-    SANDBOX_ENV_KEYS に列挙したキーのうち、値が入っているものだけを返す。
-    LLMのAPIキーは意図的に含めない。
-    """
-    from db import get_all_settings
-
-    settings = get_all_settings()
-    env = {}
-    for setting_key, env_name in SANDBOX_ENV_KEYS.items():
-        value = (settings.get(setting_key) or "").strip()
-        if value:
-            env[env_name] = value
-    return env
-
-
 def run_tool(tool_id: str, tool_name: str, code: str,
              trigger: str = "manual", schedule_id: str = None) -> dict:
     """
-    Type 1: 検証済みツールを直接実行（Podman不要、LLM不要）
+    Type 1: 検証済みツールを実行する（LLM不要）。
+
+    以前はホスト上で直接実行していたが、プレビューと本番の実行環境を
+    一致させるため、サンドボックス経由に統一した。人間のレビューを
+    通過している前提で、通信とファイル出力は許可する（PROFILE_VERIFIED_TOOL）。
     """
-    os.makedirs(WORKSPACE, exist_ok=True)
     exec_id = add_execution("tool", tool_id, tool_name, trigger, schedule_id)
 
-    with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.py', delete=False,
-        encoding='utf-8', dir=WORKSPACE
-    ) as f:
-        f.write(code)
-        temp_path = f.name
-
-    try:
-        result = subprocess.run(
-            ["python3", temp_path],
-            capture_output=True, text=True,
-            timeout=120, cwd=WORKSPACE,
-        )
-        status = "done" if result.returncode == 0 else "error"
-        finish_execution(exec_id, status, stdout=result.stdout, stderr=result.stderr)
-        return {"exec_id": exec_id, "status": status,
-                "stdout": result.stdout, "stderr": result.stderr}
-    except subprocess.TimeoutExpired:
-        finish_execution(exec_id, "error", stderr="タイムアウト（120秒）")
-        return {"exec_id": exec_id, "status": "error", "stdout": "", "stderr": "タイムアウト（120秒）"}
-    finally:
-        os.unlink(temp_path)
+    result = execute_in_sandbox(
+        code,
+        env=build_sandbox_env(),
+        **PROFILE_VERIFIED_TOOL,
+    )
+    status = "done" if result["success"] else "error"
+    finish_execution(exec_id, status, stdout=result["stdout"], stderr=result["stderr"])
+    return {"exec_id": exec_id, "status": status,
+            "stdout": result["stdout"], "stderr": result["stderr"]}
 
 
 def run_agent(task_id: str, task_name: str, task_prompt: str,

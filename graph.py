@@ -4,7 +4,7 @@ from langgraph.graph import StateGraph, END
 from config import get_llm, extract_reasoning_tokens, invoke_with_continuation, extract_text_content
 from state import AgentState
 from tools import get_tool_fn, get_tool_names, build_workspace_context, is_tool_verifiable
-from sandbox import execute_in_sandbox
+from sandbox import execute_in_sandbox, PROFILE_AGENT_CODE
 from reviewers import dispatch_reviewers, run_reviewers, aggregate_results
 from datetime import datetime
 
@@ -53,7 +53,7 @@ def build_system_prompt(step_count: int = 0, max_steps: int = 10, reasoning_dete
         "- read_file(path): ファイルを読む\n"
         "- write_file(path|content): ファイルに書く\n"
         "- list_directory(path): ディレクトリ一覧\n"
-        "- run_shell(command): シェルコマンド実行（VM上で直接実行、Podman隔離なし）\n"
+        "- run_shell(command): シェルコマンド実行（サンドボックス内。通信は遮断されている）\n"
         "- fetch_url(url): URL取得\n"
         "- web_search(query): Web検索\n"
         "- suggest_keywords(query): キーワードに対するサジェスト取得。世間がそのキーワードでよく検索する関連語を取得できる\n"
@@ -364,7 +364,7 @@ def react_step(state: AgentState) -> AgentState:
                 "last_action_type": "code",
                 "last_tool_name": "",
             }
-        result = execute_in_sandbox(code)
+        result = execute_in_sandbox(code, **PROFILE_AGENT_CODE)
         if result["success"]:
             output = result["stdout"] if result["stdout"] else "(出力なし)"
         else:

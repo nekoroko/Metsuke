@@ -1,4 +1,15 @@
-# sandbox.py — 生成コードのサンドボックス実行（Podman版）
+# sandbox.py — コード実行のサンドボックス（Podman版）
+#
+# 検証済みツール・AI生成コード・シェルコマンドを問わず、
+# コードを実行する経路はすべてこのモジュールを通る。
+#
+# 以前は「検証済みツールはホスト直接実行、未検証コードのみPodman」という
+# 使い分けだったが、以下の理由で全経路をサンドボックス化した。
+#   - プレビューと本番の実行環境が一致し、「プレビューは通ったのに
+#     本番で落ちる」が構造的に消える
+#   - 人間のレビューは万能ではなく、検証済みコードにもバグはあり得る
+#     （パス誤りによる削除など）ため、爆発半径を限定する価値がある
+#   - run_shell だけが無防備に残る状態を避ける
 import subprocess
 import tempfile
 import threading
@@ -6,6 +17,7 @@ import os
 
 from paths import BASE_DIR
 from tool_runtime import requirements_hash
+from settings_store import read_settings
 
 WORKSPACE = "/tmp/agent_workspace"
 
@@ -36,6 +48,28 @@ DEFAULT_MEMORY = os.environ.get("AGENT_SANDBOX_MEMORY", "512m")
 # 付けないと Permission denied になる。逆に不要な環境で付ける意味はないため、
 # 環境変数で明示的に有効化する。
 _MOUNT_LABEL = ",Z" if os.environ.get("AGENT_SANDBOX_SELINUX") == "1" else ""
+
+# サンドボックスに渡してよい設定キー → 環境変数名の対応表。
+#
+# 設定DB（agent_studio.db）には検索APIキーだけでなく、LLMプロバイダの
+# APIキー（api_key）も平文で同居している。DBそのものをコンテナに
+# マウントすると、実行されるコードに全プロバイダのキーを渡すことになる。
+# そのため「必要なキーだけを環境変数で個別に注入する」方式にしている。
+SANDBOX_ENV_KEYS = {
+    "tavily_api_key": "TAVILY_API_KEY",
+    "google_api_key": "GOOGLE_API_KEY",
+    "google_cse_id": "GOOGLE_CSE_ID",
+    "brave_api_key": "BRAVE_API_KEY",
+}
+
+# 実行経路ごとの権限。どこまで許すかをここに集約する。
+#
+# 検証済みツールは人間のレビューを通っているため、通信とファイル出力を許可する。
+# エージェントが実行時に組み立てるコード・コマンドは、レビューを経ていないため
+# 通信を遮断する（調査が必要なら web_search / fetch_url ツールを使わせる）。
+PROFILE_VERIFIED_TOOL = {"network": True, "writable_workspace": True, "timeout": 120}
+PROFILE_AGENT_CODE = {"network": False, "writable_workspace": False, "timeout": 60}
+PROFILE_AGENT_SHELL = {"network": False, "writable_workspace": True, "timeout": 30}
 
 _IMAGE_MISSING_MARKERS = (
     "image not known",
@@ -142,7 +176,57 @@ def image_status() -> dict:
             "current_hash": current, "expected_hash": want}
 
 
-def _build_podman_args(script_path_in_container: str, network: bool,
+def build_sandbox_env() -> dict:
+    """
+    サンドボックスに渡す環境変数を組み立てる。
+    SANDBOX_ENV_KEYS に列挙したキーのうち、値が入っているものだけを返す。
+    LLMのAPIキーは意図的に含めない。
+    """
+    settings = read_settings()
+    env = {}
+    for setting_key, env_name in SANDBOX_ENV_KEYS.items():
+        value = (settings.get(setting_key) or "").strip()
+        if value:
+            env[env_name] = value
+    return env
+
+
+def parse_mounts(text: str) -> list:
+    """
+    追加マウント設定を解析する。1行1マウントで、以下の形式。
+
+        /host/path:/container/path:ro
+        /host/path:/container/path        （modeを省略すると ro）
+        /host/path                        （コンテナ内も同じパス、ro）
+
+    全実行がサンドボックス化されたことで、作業ディレクトリ以外のホスト
+    ファイル（ログ、CSV等）に触るツールはマウント指定が必須になる。
+    ツール個別ではなく全体設定にしているのは、実行経路ごとに権限が
+    バラつくのを避けるため。
+    """
+    mounts = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(":")]
+        host = parts[0]
+        if not host:
+            continue
+        container = parts[1] if len(parts) > 1 and parts[1] else host
+        mode = parts[2] if len(parts) > 2 and parts[2] else "ro"
+        if mode not in ("ro", "rw"):
+            mode = "ro"
+        mounts.append((host, container, mode))
+    return mounts
+
+
+def configured_mounts() -> list:
+    """設定DBに保存された追加マウントを返す"""
+    return parse_mounts(read_settings().get("sandbox_extra_mounts", ""))
+
+
+def _build_podman_args(container_argv: list, network: bool,
                        writable_workspace: bool, env: dict, extra_mounts: list) -> list:
     """podman run の引数列を組み立てる"""
     args = [
@@ -163,7 +247,8 @@ def _build_podman_args(script_path_in_container: str, network: bool,
     mode = "rw" if writable_workspace else "ro"
     args += ["-v", f"{WORKSPACE}:{WORKSPACE}:{mode}{_MOUNT_LABEL}"]
 
-    for host_path, container_path, mount_mode in (extra_mounts or []):
+    # 設定された追加マウント + 呼び出し側が指定した分
+    for host_path, container_path, mount_mode in configured_mounts() + list(extra_mounts or []):
         args += ["-v", f"{host_path}:{container_path}:{mount_mode}{_MOUNT_LABEL}"]
 
     # 設定DB（agent_studio.db）にはLLMプロバイダのAPIキーも平文で同居しているため、
@@ -171,8 +256,72 @@ def _build_podman_args(script_path_in_container: str, network: bool,
     for key, value in (env or {}).items():
         args += ["-e", f"{key}={value}"]
 
-    args += [SANDBOX_IMAGE, "python3", script_path_in_container]
+    args += [SANDBOX_IMAGE] + list(container_argv)
     return args
+
+
+def _run_in_container(container_argv: list, timeout: int, network: bool,
+                      writable_workspace: bool, env: dict, extra_mounts: list) -> dict:
+    """
+    コンテナ内で任意のコマンドを実行する共通処理。
+    Pythonコード実行もシェル実行もここを通る。
+    """
+    # 初回、および requirements-tools.txt 変更後は、ここで自動ビルドが走る
+    ensured = ensure_sandbox_image()
+    if not ensured["ok"]:
+        return {"success": False, "stdout": "", "stderr": ensured["message"]}
+
+    args = _build_podman_args(
+        container_argv,
+        network=network,
+        writable_workspace=writable_workspace,
+        env=env,
+        extra_mounts=extra_mounts,
+    )
+
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"success": False, "stdout": "", "stderr": f"タイムアウト（{timeout}秒）"}
+    except FileNotFoundError:
+        return {
+            "success": False, "stdout": "",
+            "stderr": "podmanが見つかりません。'sudo apt install podman' でインストールしてください。",
+        }
+
+    stderr = result.stderr
+    if result.returncode != 0 and any(
+        m in stderr.lower() for m in _IMAGE_MISSING_MARKERS
+    ):
+        stderr = (
+            f"サンドボックスイメージ '{SANDBOX_IMAGE}' が見つかりません。\n"
+            "リポジトリのルートで以下を実行してビルドしてください:\n"
+            f"  podman build -t {SANDBOX_IMAGE} .\n\n"
+            f"--- podmanの出力 ---\n{stderr}"
+        )
+
+    return {
+        "success": result.returncode == 0,
+        "stdout": result.stdout,
+        "stderr": stderr,
+        "returncode": result.returncode,
+    }
+
+
+def execute_shell_in_sandbox(command: str, timeout: int = 30, network: bool = False,
+                             writable_workspace: bool = True, env: dict = None,
+                             extra_mounts: list = None) -> dict:
+    """
+    シェルコマンドをコンテナ内で実行する。
+
+    以前 run_shell はホスト上で直接実行されており、generate_code の隔離を
+    回避できる唯一の経路になっていた。ここを通すことでその穴を塞ぐ。
+    """
+    return _run_in_container(
+        ["sh", "-c", command],
+        timeout=timeout, network=network, writable_workspace=writable_workspace,
+        env=env, extra_mounts=extra_mounts,
+    )
 
 
 def execute_in_sandbox(code: str, timeout: int = 60, network: bool = False,
@@ -200,14 +349,9 @@ def execute_in_sandbox(code: str, timeout: int = 60, network: bool = False,
          設定DBをマウントする代わりに、必要なキーだけをここで渡す。
     extra_mounts: [(ホストパス, コンテナ内パス, "ro"|"rw"), ...]
     """
-    # 初回、および requirements-tools.txt 変更後は、ここで自動ビルドが走る
-    ensured = ensure_sandbox_image()
-    if not ensured["ok"]:
-        return {"success": False, "stdout": "", "stderr": ensured["message"]}
-
     os.makedirs(WORKSPACE, exist_ok=True)
 
-    # 生成コードを一時ファイルに書き出す
+    # 生成コードを一時ファイルに書き出す（ワークスペース経由でコンテナに渡す）
     with tempfile.NamedTemporaryFile(
         mode='w', suffix='.py', delete=False,
         encoding='utf-8', dir=WORKSPACE
@@ -216,44 +360,15 @@ def execute_in_sandbox(code: str, timeout: int = 60, network: bool = False,
         temp_filename = os.path.basename(f.name)
         temp_path = f.name
 
-    args = _build_podman_args(
-        f"{WORKSPACE}/{temp_filename}",
-        network=network,
-        writable_workspace=writable_workspace,
-        env=env,
-        extra_mounts=extra_mounts,
-    )
-
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-
-        stderr = result.stderr
-        if result.returncode != 0 and any(
-            m in stderr.lower() for m in _IMAGE_MISSING_MARKERS
-        ):
-            stderr = (
-                f"サンドボックスイメージ '{SANDBOX_IMAGE}' が見つかりません。\n"
-                "リポジトリのルートで以下を実行してビルドしてください（初回のみ）:\n"
-                f"  podman build -t {SANDBOX_IMAGE} .\n\n"
-                f"--- podmanの出力 ---\n{stderr}"
-            )
-
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout,
-            "stderr": stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": f"タイムアウト（{timeout}秒）",
-        }
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "podmanが見つかりません。'sudo apt install podman' でインストールしてください。",
-        }
+        return _run_in_container(
+            ["python3", f"{WORKSPACE}/{temp_filename}"],
+            timeout=timeout, network=network,
+            writable_workspace=writable_workspace,
+            env=env, extra_mounts=extra_mounts,
+        )
     finally:
-        os.unlink(temp_path)
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
