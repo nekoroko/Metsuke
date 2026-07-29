@@ -87,6 +87,44 @@
         "営業利益は9.2兆ウォン [実績] でした。",
         "株価は-14.65% [実績] でした。"
       ]
+    },
+    {
+      "id": "doc28_yahoo_timeseries",
+      "raw_file": "raw/doc28_yahoo_timeseries.txt",
+      "note": "実LLM検証（2026-07-30, qwen3.5-4b, ReAct）で取得。株価の時系列表。数値に単位が付かないため台帳に1件も載らず、回答の「130.17ドル」等が「出典に見当たらない」と却下された（報告A）。",
+      "present_values": [
+        "130.17",
+        "136.49",
+        "128.29",
+        "154.57",
+        "124.80"
+      ],
+      "rejected_in_run": [
+        "130.17ドル",
+        "136.49ドル",
+        "128.29ドル",
+        "127.29ドル",
+        "135.91ドル",
+        "124.80ドル"
+      ]
+    },
+    {
+      "id": "doc28_moomoo_quote",
+      "raw_file": "raw/doc28_moomoo_quote.txt",
+      "note": "実LLM検証で取得。値→ラベルの並び（報告M1と同じ形）。単位付きは 0.55%相当の売買回転率0.74% と 配当利回8.91% だけ。",
+      "layout": "value_then_label"
+    },
+    {
+      "id": "doc28_headlines_actual",
+      "raw_file": "raw/doc28_headlines_actual.txt",
+      "note": "実績を報じる文。ただし「予想下回り」「予想に届かず」のように予想語を含むため、classify_value_type が forecast と誤分類する（報告B）。",
+      "expected_value_type": "actual"
+    },
+    {
+      "id": "doc28_headlines_forecast",
+      "raw_file": "raw/doc28_headlines_forecast.txt",
+      "note": "本当に予想を語る文。報告Bの修正で actual に転んではいけない側。",
+      "expected_value_type": "forecast"
     }
   ]
 }
