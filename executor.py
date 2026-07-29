@@ -138,6 +138,7 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
             exec_id, final_state["status"],
             stdout=result_text,
             history=final_state["history"],
+            trace=final_state.get("trace"),
         )
         return {"exec_id": exec_id, "status": final_state["status"],
                 "stdout": result_text, "stderr": ""}
@@ -211,7 +212,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None):
             for node_name, state in step.items():
                 final_state = state
                 # 各ステップごとにDBに進捗を保存
-                update_execution_progress(exec_id, state["history"])
+                update_execution_progress(exec_id, state["history"], state.get("trace"))
 
         if final_state is None:
             finish_execution(exec_id, "error", stderr="実行結果が空です")
@@ -228,6 +229,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None):
             exec_id, final_state["status"],
             stdout=result_text,
             history=final_state["history"],
+            trace=final_state.get("trace"),
         )
 
     except Exception as e:
@@ -337,6 +339,7 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
                 exec_id, final_state["status"],
                 stdout=result_text,
                 history=final_state["history"],
+                trace=final_state.get("trace"),
             )
 
     except Exception as e:

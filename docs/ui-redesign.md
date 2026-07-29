@@ -203,3 +203,34 @@ Streamlit公式の `st.testing.v1.AppTest` を使い、ヘッドレスで確認�
   常時表示するかどうか
 - ダークテーマを正式にサポートするか（現在は `config.toml` で light 固定。
   自前CSSのバッジ色が light 前提のため、対応するなら配色の見直しが必要）
+
+## 10. 追加: ノード遷移トレース（実行履歴）
+
+ReActループの記録は「エージェントが何を言ったか」（history）だけだったため、
+`verify_tool` が予算切れで素通りしたのか、`correct` が数値の問題を見つけて
+差し戻したのか、といったグラフ側の挙動が画面から一切見えなかった。
+
+### 設計
+
+- 記録はhistoryとは別系統の `trace` に持つ。historyはLLMへ渡す会話ログで
+  `MAX_HISTORY_ROUNDS` によるトリミングの対象なので、ノード情報を混ぜると
+  回答を書くための枠を食う。
+- 各ノードの `return` はすべて `graph._with_trace()` を通す。1回の遷移につき
+  `seq / node / from / summary / next / note / skipped` と、そのノードを
+  抜けた時点のカウンタ（step・verify・correct・critique）を1件積む。
+- `skipped=True` は「ノードには入ったが本来の処理をせず通過した」ことを表す。
+  予算切れ・DONE本文なし・ACTIONが解析できない、といったケース。
+- DBは `executions.trace`（JSON、PRAGMAで既存DBへ後付け）。
+  `finish_execution` はhistory/traceを渡されたときだけ上書きする。
+  エラー終了の呼び出しは渡さないため、無条件に書くと実行中に記録した
+  内容が消え、落ちた原因を追えなくなる。
+
+### 表示
+
+- 実行履歴カードに「🔀 ノード遷移」を追加。表で遷移元・ノード・実行/スキップ・
+  内容・次・カウンタを出し、スキップ分は理由を下に列挙する。
+- エージェント画面のポーリング表示でも、実行中に同じ表を確認できる。
+- 「📋 まとめてコピー」の出力にもノード遷移の節が入る（履歴より前に置く）。
+
+整形は `trace_view.py` に置き、streamlitに依存させていない。
+テストは `tests/test_trace.py`（`tests/stubs.py` でLLM依存をスタブ化）。

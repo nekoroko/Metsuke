@@ -50,6 +50,34 @@ SECTIONS_WRITE = [_WRITE_0, _WRITE_1, _WRITE_2, _WRITE_3, _WRITE_4, _WRITE_5]
 # 定数ではなく build_system_prompt 内で生成する。
 
 
+def _with_trace(prev_state: dict, out: dict, node: str, summary: str,
+                next_node: str = "", note: str = "", skipped: bool = False) -> dict:
+    """
+    ノードの実行を1件記録して返す。
+
+    履歴（history）はLLMへ渡す会話ログなので、そこにノード情報を混ぜると
+    トリミングの枠を食ってしまう。実行経路の記録は別系統（trace）で持つ。
+
+    カウンタは「そのノードを抜けた時点」の値を入れる。
+    """
+    prev = prev_state.get("trace") or []
+    entry = {
+        "seq": len(prev) + 1,
+        "node": node,
+        "from": prev[-1]["node"] if prev else "(開始)",
+        "summary": summary,
+        "next": next_node,
+        "note": note,
+        "skipped": skipped,
+        "status": out.get("status", prev_state.get("status", "")),
+        "step_count": out.get("step_count", prev_state.get("step_count", 0)),
+        "critique_count": out.get("critique_count", prev_state.get("critique_count", 0)),
+        "correction_count": out.get("correction_count", prev_state.get("correction_count", 0)),
+        "tool_verify_count": out.get("tool_verify_count", prev_state.get("tool_verify_count", 0)),
+    }
+    return {**out, "trace": prev + [entry]}
+
+
 def _findings_section(findings: list) -> str:
     """
     数値台帳をプロンプトへ埋め込む節を作る。
@@ -315,15 +343,18 @@ def react_step(state: AgentState) -> AgentState:
         forced = _force_finalize(state)
         if forced:
             new_history = state["history"] + [{"role": "assistant", "content": forced}]
-            return {
+            return _with_trace(state, {
                 **state,
                 "history": new_history,
                 "status": "done",
                 "step_count": state["step_count"] + 1,
                 "last_action_type": "done",
                 "last_tool_name": "",
-            }
-        return {**state, "status": "error", "last_action_type": "", "last_tool_name": ""}
+            }, "react", "ステップ上限に到達したため強制的にまとめた", "END",
+                note=f"step_count={state['step_count']} >= max_steps={state['max_steps']}")
+        return _with_trace(state, {
+            **state, "status": "error", "last_action_type": "", "last_tool_name": "",
+        }, "react", "強制収束にも失敗", "END", note="回答を生成できなかった")
 
     reasoning_detected = state.get("reasoning_detected", False)
     llm = get_llm(temperature=0.1, boost_tokens=reasoning_detected)
@@ -370,7 +401,7 @@ def react_step(state: AgentState) -> AgentState:
             "role": "result",
             "content": "LLMが空応答を返しました。THOUGHT/ACTION/DONE形式で再度回答してください。"
         }]
-        return {
+        return _with_trace(state, {
             **state,
             "history": new_history,
             "status": "running",
@@ -378,13 +409,13 @@ def react_step(state: AgentState) -> AgentState:
             "reasoning_detected": reasoning_detected,
             "last_action_type": "",
             "last_tool_name": "",
-        }
+        }, "react", "LLMが空応答を返した", "react", note="再回答を促した")
 
     action = parse_action(llm_output)
     new_history = state["history"] + [{"role": "assistant", "content": llm_output}]
 
     if action["type"] == "done":
-        return {
+        return _with_trace(state, {
             **state,
             "history": new_history,
             "status": "needs_revision",
@@ -392,7 +423,7 @@ def react_step(state: AgentState) -> AgentState:
             "reasoning_detected": reasoning_detected,
             "last_action_type": "done",
             "last_tool_name": "",
-        }
+        }, "react", f"DONEを出力（{len(action['content'])}文字）", "correct")
 
     elif action["type"] == "tool":
         tool_name = action.get("name", "")
@@ -405,6 +436,7 @@ def react_step(state: AgentState) -> AgentState:
         else:
             result = f"ツール '{tool_name}' は存在しません。generate_codeでPythonコードを生成してください。"
         new_history.append({"role": "result", "content": result})
+        verifiable = is_tool_verifiable(tool_name)
 
         # ツール結果から数値・日付を機械抽出して台帳へ積む。
         # 履歴と違ってトリミングされないので、後のステップでも参照できる。
@@ -416,7 +448,8 @@ def react_step(state: AgentState) -> AgentState:
                 step=state["step_count"] + 1,
             ),
         )
-        return {
+        added = len(new_findings) - len(state.get("findings", []))
+        return _with_trace(state, {
             **state,
             "history": new_history,
             "findings": new_findings,
@@ -425,13 +458,17 @@ def react_step(state: AgentState) -> AgentState:
             "reasoning_detected": reasoning_detected,
             "last_action_type": "tool",
             "last_tool_name": tool_name,
-        }
+        }, "react", f"ツール実行: {tool_name}({action['arg'][:40]})",
+            "verify_tool" if verifiable else "react",
+            note=(f"台帳に{added}件追加" if verifiable
+                  else f"台帳に{added}件追加 / verify_tool はスキップ"
+                       f"（{tool_name} は品質判定の対象外）"))
 
     elif action["type"] == "code":
         code = action["content"]
         if not code:
             new_history.append({"role": "result", "content": "コードが空です。Pythonコードブロックを含めてください。"})
-            return {
+            return _with_trace(state, {
                 **state,
                 "history": new_history,
                 "status": "running",
@@ -439,14 +476,14 @@ def react_step(state: AgentState) -> AgentState:
                 "reasoning_detected": reasoning_detected,
                 "last_action_type": "code",
                 "last_tool_name": "",
-            }
+            }, "react", "generate_code だがコードが空", "react")
         result = execute_in_sandbox(code, **PROFILE_AGENT_CODE)
         if result["success"]:
             output = result["stdout"] if result["stdout"] else "(出力なし)"
         else:
             output = f"エラー:\n{result['stderr']}"
         new_history.append({"role": "result", "content": output})
-        return {
+        return _with_trace(state, {
             **state,
             "history": new_history,
             "generated_code": code,
@@ -455,7 +492,8 @@ def react_step(state: AgentState) -> AgentState:
             "reasoning_detected": reasoning_detected,
             "last_action_type": "code",
             "last_tool_name": "",
-        }
+        }, "react", f"コード実行（{len(code)}文字）", "react",
+            note="成功" if result["success"] else "エラー")
 
     else:
         new_history.append({"role": "result", "content": (
@@ -465,7 +503,7 @@ def react_step(state: AgentState) -> AgentState:
             "ツールを使う場合は ACTION の行にツール名と丸括弧の引数を書いてください。\n"
             "書式の説明を本文中で引用せず、実際にその書式で書いてください。"
         )})
-        return {
+        return _with_trace(state, {
             **state,
             "history": new_history,
             "status": "running",
@@ -473,7 +511,8 @@ def react_step(state: AgentState) -> AgentState:
             "reasoning_detected": reasoning_detected,
             "last_action_type": "unknown",
             "last_tool_name": "",
-        }
+        }, "react", "回答形式を認識できなかった", "react",
+            note="THOUGHT/ACTION/DONE のいずれも見つからない")
 
 
 def verify_tool_step(state: AgentState) -> AgentState:
@@ -499,7 +538,10 @@ def verify_tool_step(state: AgentState) -> AgentState:
 
     if verify_count >= max_verifies:
         # 予算切れ。判定をスキップしてそのままreactに戻す
-        return {**state, "status": "running", "tool_verify_count": verify_count + 1}
+        return _with_trace(state,
+            {**state, "status": "running", "tool_verify_count": verify_count + 1},
+            "verify_tool", "スキップ", "react",
+            note=f"判定の予算切れ（{verify_count}/{max_verifies}）", skipped=True)
 
     history = state["history"]
 
@@ -515,11 +557,17 @@ def verify_tool_step(state: AgentState) -> AgentState:
             break
 
     if not last_assistant_content or not last_result_content:
-        return {**state, "status": "running", "tool_verify_count": verify_count + 1}
+        return _with_trace(state,
+            {**state, "status": "running", "tool_verify_count": verify_count + 1},
+            "verify_tool", "スキップ", "react",
+            note="判定に必要な履歴が揃っていない", skipped=True)
 
     action_match = re.search(r"ACTION:\s*(\w+)\((.+?)\)", last_assistant_content, re.DOTALL)
     if not action_match:
-        return {**state, "status": "running", "tool_verify_count": verify_count + 1}
+        return _with_trace(state,
+            {**state, "status": "running", "tool_verify_count": verify_count + 1},
+            "verify_tool", "スキップ", "react",
+            note="直前のACTION行を解析できない", skipped=True)
     tool_query = action_match.group(2).strip().strip("'\"")
 
     llm = get_llm(temperature=0.1)
@@ -541,9 +589,11 @@ def verify_tool_step(state: AgentState) -> AgentState:
 
     try:
         verify_output, _resp = invoke_with_continuation(llm, verify_messages, max_continuations=1)
-    except Exception:
+    except Exception as e:
         # 判定自体が失敗したら、安全側でそのままreactに戻す（結果は信じる）
-        return {**state, "status": "running", "tool_verify_count": verify_count + 1}
+        return _with_trace(state,
+            {**state, "status": "running", "tool_verify_count": verify_count + 1},
+            "verify_tool", "判定に失敗", "react", note=str(e)[:80], skipped=True)
 
     verdict_match = re.search(r"VERDICT:\s*(OK|NG)", verify_output or "", re.IGNORECASE)
     verdict = verdict_match.group(1).upper() if verdict_match else "OK"
@@ -560,12 +610,13 @@ def verify_tool_step(state: AgentState) -> AgentState:
             feedback += f" 次はこのようなクエリを試すことを検討してください: 「{suggested_query}」"
         new_history.append({"role": "result", "content": feedback})
 
-    return {
+    return _with_trace(state, {
         **state,
         "history": new_history,
         "status": "running",
         "tool_verify_count": verify_count + 1,
-    }
+    }, "verify_tool", f"検索結果の品質判定: {verdict}", "react",
+        note=("再検索を促した" if verdict == "NG" else "結果は妥当と判断"))
 
 
 def _extract_done(history: list) -> str:
@@ -589,7 +640,9 @@ def correct_step(state: AgentState) -> AgentState:
     """
     done_content = _extract_done(state["history"])
     if not done_content:
-        return {**state, "status": "needs_revision"}
+        return _with_trace(state, {**state, "status": "needs_revision"},
+            "correct", "スキップ", "critic",
+            note="履歴にDONE本文が見つからない", skipped=True)
 
     try:
         result = numeric_checker(
@@ -599,7 +652,7 @@ def correct_step(state: AgentState) -> AgentState:
         )
     except Exception as e:
         # 機械チェックの失敗でループを止めない。ただし黙って通さず履歴に残す
-        return {
+        out = {
             **state,
             "history": state["history"] + [{
                 "role": "result",
@@ -610,6 +663,8 @@ def correct_step(state: AgentState) -> AgentState:
             + [f"数値の機械照合を実行できませんでした: {e}"],
             "correction_count": state.get("correction_count", 0) + 1,
         }
+        return _with_trace(state, out, "correct", "照合の実行に失敗", "critic",
+                           note=str(e)[:80])
 
     issues = list(result["issues"])
     instruction = result["instruction"]
@@ -634,11 +689,11 @@ def correct_step(state: AgentState) -> AgentState:
             )
 
     if not issues:
-        return {
+        return _with_trace(state, {
             **state,
             "status": "needs_revision",
             "correction_count": state.get("correction_count", 0) + 1,
-        }
+        }, "correct", "数値の機械照合: 問題なし", "critic")
 
     # 差し戻せるかどうかは予算次第。差し戻せない場合でも検証は済んでいるので、
     # 結果を捨てずに verification_notes へ残し、最終回答に注記として出す。
@@ -653,12 +708,13 @@ def correct_step(state: AgentState) -> AgentState:
     )
 
     if not can_retry:
-        return {
+        return _with_trace(state, {
             **state,
             "status": "needs_revision",
             "verification_notes": state.get("verification_notes", []) + issues,
             "correction_count": state.get("correction_count", 0) + 1,
-        }
+        }, "correct", f"数値の問題を{len(issues)}件検出（差し戻せず）", "critic",
+            note="訂正の予算切れ。最終回答に注記として残す")
 
     feedback = "（自動訂正チェック）最終回答に問題があります。\n"
     feedback += "\n".join(f"- {i}" for i in issues)
@@ -666,23 +722,28 @@ def correct_step(state: AgentState) -> AgentState:
         feedback += f"\n\n{instruction}"
     feedback += "\n訂正した上で、再度DONEで最終回答を出してください。"
 
-    return {
+    return _with_trace(state, {
         **state,
         "history": state["history"] + [{"role": "result", "content": feedback}],
         "status": "running",
         "correction_count": state.get("correction_count", 0) + 1,
-    }
+    }, "correct", f"数値の問題を{len(issues)}件検出", "react", note="訂正を差し戻した")
 
 
 def critic_step(state: AgentState) -> AgentState:
     """専門家プールによるレビュー"""
     if state["critique_count"] >= state["max_critiques"]:
-        return {**state, "status": "done"}
+        return _with_trace(state, {**state, "status": "done"},
+            "critic", "スキップ", "END",
+            note=f"レビューの予算切れ（{state['critique_count']}/{state['max_critiques']}）",
+            skipped=True)
 
     remaining_steps = state["max_steps"] - state["step_count"]
     if remaining_steps <= 1:
         # 差し戻す予算がないため、そのままdoneにする
-        return {**state, "status": "done"}
+        return _with_trace(state, {**state, "status": "done"},
+            "critic", "スキップ", "END",
+            note=f"差し戻すステップ予算がない（残り{remaining_steps}）", skipped=True)
 
     done_content = ""
     for entry in reversed(state["history"]):
@@ -691,7 +752,9 @@ def critic_step(state: AgentState) -> AgentState:
             break
 
     if not done_content:
-        return {**state, "status": "done"}
+        return _with_trace(state, {**state, "status": "done"},
+            "critic", "スキップ", "END",
+            note="履歴にDONE本文が見つからない", skipped=True)
 
     try:
         reviewer_names = dispatch_reviewers(state["task"], done_content, output_type="auto")
@@ -711,11 +774,11 @@ def critic_step(state: AgentState) -> AgentState:
     aggregated = aggregate_results(review_results)
 
     if aggregated["verdict"] == "OK":
-        return {
+        return _with_trace(state, {
             **state,
             "status": "done",
             "critique_count": state["critique_count"] + 1,
-        }
+        }, "critic", f"レビュー: OK（{', '.join(reviewer_names)}）", "END")
 
     feedback_content = "複数のレビュアーから以下の指摘がありました。"
     feedback_content += "指摘を反映してから再度DONEで最終回答を出してください。\n\n"
@@ -730,12 +793,13 @@ def critic_step(state: AgentState) -> AgentState:
         "content": feedback_content,
     }]
 
-    return {
+    return _with_trace(state, {
         **state,
         "history": new_history,
         "status": "running",
         "critique_count": state["critique_count"] + 1,
-    }
+    }, "critic", f"レビュー: 要修正（{', '.join(reviewer_names)}）", "react",
+        note=f"指摘{len(aggregated['issues'])}件")
 
 
 def route_after_react(state: AgentState) -> str:

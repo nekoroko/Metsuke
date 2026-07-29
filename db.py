@@ -70,10 +70,16 @@ def init_db():
             stdout      TEXT,
             stderr      TEXT,
             history     TEXT,
+            trace       TEXT,
             started_at  TEXT,
             finished_at TEXT
         )
     """)
+
+    # 既存DBに trace が無ければ追加する（agent_tasks と同じマイグレーション方式）
+    cursor = conn.execute("PRAGMA table_info(executions)")
+    if "trace" not in [row[1] for row in cursor.fetchall()]:
+        conn.execute("ALTER TABLE executions ADD COLUMN trace TEXT")
 
     # AI生成セッション
     conn.execute("""
@@ -334,12 +340,14 @@ def add_execution(exec_type, target_id, target_name, trigger="manual", schedule_
     conn.close()
     return exec_id
 
-def update_execution_progress(exec_id: str, history: list):
-    """実行中の履歴を逐次更新する（バックグラウンド実行の進捗用）"""
+def update_execution_progress(exec_id: str, history: list, trace: list = None):
+    """実行中の履歴とノード遷移を逐次更新する（バックグラウンド実行の進捗用）"""
     conn = get_connection()
     conn.execute(
-        "UPDATE executions SET history = ? WHERE id = ?",
-        (json.dumps(history, ensure_ascii=False) if history else None, exec_id)
+        "UPDATE executions SET history = ?, trace = ? WHERE id = ?",
+        (json.dumps(history, ensure_ascii=False) if history else None,
+         json.dumps(trace, ensure_ascii=False) if trace else None,
+         exec_id)
     )
     conn.commit()
     conn.close()
@@ -350,12 +358,30 @@ def get_execution(exec_id: str) -> dict | None:
     conn.close()
     return dict(row) if row else None
 
-def finish_execution(exec_id, status, stdout="", stderr="", history=None):
+def finish_execution(exec_id, status, stdout="", stderr="", history=None, trace=None):
+    """
+    実行を終了状態にする。
+
+    history / trace は「渡されたときだけ」上書きする。エラー終了の呼び出しは
+    これらを渡さないため、無条件にNULLを書くと update_execution_progress が
+    実行中に記録した履歴とノード遷移が消えてしまう。落ちた原因を追うのに
+    一番必要な情報なので、消さずに残す。
+    """
+    sets = ["status=?", "stdout=?", "stderr=?"]
+    vals = [status, stdout, stderr]
+    if history is not None:
+        sets.append("history=?")
+        vals.append(json.dumps(history, ensure_ascii=False))
+    if trace is not None:
+        sets.append("trace=?")
+        vals.append(json.dumps(trace, ensure_ascii=False))
+    sets.append("finished_at=?")
+    vals.append(datetime.now().isoformat())
+
     conn = get_connection()
     conn.execute(
-        "UPDATE executions SET status=?, stdout=?, stderr=?, history=?, finished_at=? WHERE id=?",
-        (status, stdout, stderr, json.dumps(history, ensure_ascii=False) if history else None,
-         datetime.now().isoformat(), exec_id)
+        f"UPDATE executions SET {', '.join(sets)} WHERE id=?",
+        (*vals, exec_id)
     )
     conn.commit()
     conn.close()

@@ -18,6 +18,7 @@ class AgentState(TypedDict):
     findings: list[dict]      # 検索結果から機械抽出した数値・日付。履歴トリミングの対象外
     sources: list[dict]       # 出典の取得結果（digestノード用。現時点では未使用）
     verification_notes: list[str]  # 差し戻せなかった検証結果。最終回答に注記として出す
+    trace: list[dict]         # ノードの実行履歴（どこから来て何をして次はどこか）
     correction_count: int     # correctノードを通った回数
     max_corrections: int      # 訂正の差し戻し上限
 
@@ -51,6 +52,7 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "findings": [],
         "sources": [],
         "verification_notes": [],
+        "trace": [],
         "correction_count": 0,
         "max_corrections": max_corrections,
     }

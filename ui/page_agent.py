@@ -11,6 +11,7 @@ from db import (
     get_verified_tools, get_execution,
 )
 from executor import parse_history_for_display
+from trace_view import parse_trace, skipped_count, trace_rows
 from scheduler import run_agent_now
 
 
@@ -129,6 +130,19 @@ def render():
                                             st.code(info.get("result", ""))
                             except (json.JSONDecodeError, TypeError):
                                 pass
+
+                        # ノード遷移（実行中も進捗と一緒に書き込まれる）
+                        trace = parse_trace(exec_data.get("trace"))
+                        if trace:
+                            skipped = skipped_count(trace)
+                            label = f"🔀 ノード遷移（{len(trace)}件"
+                            label += f" / スキップ {skipped}件）" if skipped else "）"
+                            with st.expander(label, expanded=False):
+                                st.dataframe(
+                                    trace_rows(trace),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
 
                         # 最終結果
                         if status == "done":
