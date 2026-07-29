@@ -675,15 +675,54 @@ def _labels_conflict(answer_labels: set, source_labels: set) -> bool:
     return not any(a == s or a in s or s in a for a, s in comparable)
 
 
+# 「予想と比べてどうだったか」を語る言い回し。「予想」の語は入っているが、
+# 文が語っている数値そのものは実績側にある。
+#
+# 実データ（tests/fixtures/raw/doc28_headlines_actual.txt）では、実績を報じる
+# 13件のうち7件がこの形で forecast に誤分類されていた。「予想を下回った」の
+# 主語は実績であって、予想値ではない。
+COMPARISON_WORDS = (
+    "予想を下回", "予想を上回", "予想に届か", "予想下回り", "予想上回り",
+    "予想下振れ", "予想上振れ", "予想に反し", "予想を嫌気",
+    "コンセンサスを下回", "コンセンサスを上回",
+    "実際の",
+)
+
+# その数値自身が予想であると宣言している言い回し。比較語より強い。
+# 「市場予想を上回る見通しだ」は、比較語と宣言語が同居していても予想の話。
+DECLARES_FORECAST = (
+    "見通し", "見込ま", "見込み", "と予想", "予想される", "予想する",
+    "予想によると", "コンセンサス予想", "予測",
+)
+
+
 def classify_value_type(context: str) -> str:
     """
     出典の文脈から、その数値が実績か予想かを機械的に判定する。
 
     戻り値は "actual" / "forecast" / "unknown"。
     フリーテキストの [実績] タグに頼らず、収集の時点で型を付けるための関数。
-    予想語と実績語が同居する場合は、予想を優先して安全側に倒す。
+
+    判定は3段構え。
+
+    1. 宣言語（「見通し」「と予想」）があれば forecast。比較語と同居しても
+       こちらを採る。数値自身が予想だと言っている方が強い証拠だから。
+    2. 比較語（「予想を下回った」）しか無ければ actual。予想の語が入って
+       いるだけで、語られている数値は実績。
+    3. どちらでもなければ、従来どおり FORECAST_WORDS → ACTUAL_WORDS の順で
+       見て、決め手が無ければ unknown。
+
+    2 を足す前は「予想」が1文字でも入れば forecast だったため、決算の実績を
+    報じる見出しがほぼ全滅していた。逆に unknown を減らそうとして「文脈的に
+    実績だろう」まで actual に寄せることはしない。誤って actual と付けた値は
+    そのまま断定として回答に出てしまうので、決め手が無いときは unknown を
+    残す方が安全側になる。
     """
     text = context or ""
+    if any(w in text for w in DECLARES_FORECAST):
+        return "forecast"
+    if any(w in text for w in COMPARISON_WORDS):
+        return "actual"
     if any(w in text for w in FORECAST_WORDS):
         return "forecast"
     if any(w in text for w in ACTUAL_WORDS):

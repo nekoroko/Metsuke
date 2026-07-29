@@ -182,14 +182,166 @@
     {
       "id": "doc28_headlines_actual",
       "raw_file": "raw/doc28_headlines_actual.txt",
-      "note": "実績を報じる文。ただし「予想下回り」「予想に届かず」のように予想語を含むため、classify_value_type が forecast と誤分類する（報告B）。",
-      "expected_value_type": "actual"
+      "note": "実績を報じる文。ただし「予想下回り」「予想に届かず」のように予想語を含むため、classify_value_type が forecast と誤分類する（報告B）。expectations は line（0始まりの行番号）と raw（extract_numbers が返す表記そのまま）で1件ずつ固定する。unknown は「まだ判定材料が無いので unknown のままで正解」という意味であって、直し損ねではない。",
+      "expectations": [
+        {
+          "line": 0,
+          "raw": "557％",
+          "value_type": "actual",
+          "why": "「予想下回り」は実績と予想を比べている比較語。この文が語っている557％は実績。"
+        },
+        {
+          "line": 0,
+          "raw": "10％",
+          "value_type": "actual",
+          "why": "同じ文の株価下落率。実際に下がった値なので実績。"
+        },
+        {
+          "line": 1,
+          "raw": "557%",
+          "value_type": "actual",
+          "why": "「市場予想に届かず」も比較語。急増した557%は実績。"
+        },
+        {
+          "line": 1,
+          "raw": "4%",
+          "value_type": "actual",
+          "why": "時間外の下落率。実績。"
+        },
+        {
+          "line": 2,
+          "raw": "６０兆５０００億ウォン",
+          "value_type": "unknown",
+          "why": "「営業利益は…で、前年同期の…から急増」。宣言語も比較語も無い。文脈上は実績だが、そう決められる語がこの文に無いので unknown のままで正解。"
+        },
+        {
+          "line": 2,
+          "raw": "４１６億２０００万ドル",
+          "value_type": "unknown",
+          "why": "同上（同じ文の換算値）。"
+        },
+        {
+          "line": 2,
+          "raw": "９兆２０００億ウォン",
+          "value_type": "unknown",
+          "why": "同上（同じ文の前年同期値）。"
+        },
+        {
+          "line": 2,
+          "raw": "６４兆ウォン",
+          "value_type": "forecast",
+          "why": "「アナリスト予想の…には届かなかった」。この数値自体が予想値。実績側の文に混ざっていても forecast のままでなければならない。"
+        },
+        {
+          "line": 2,
+          "raw": "２５７％",
+          "value_type": "actual",
+          "why": "「…だった」（ACTUAL_WORDS）で今も actual。修正で壊してはいけない側。"
+        },
+        {
+          "line": 2,
+          "raw": "７９兆３０００億ウォン",
+          "value_type": "actual",
+          "why": "同上。"
+        },
+        {
+          "line": 3,
+          "raw": "5.4%",
+          "value_type": "actual",
+          "why": "「実際の売上高と営業利益はそれぞれ予想を…下回った」。「実際の」「予想を…下回った」がどちらも比較語で、語られているのは実績との差。"
+        },
+        {
+          "line": 3,
+          "raw": "5.7%",
+          "value_type": "actual",
+          "why": "同上。"
+        },
+        {
+          "line": 4,
+          "raw": "１０％",
+          "value_type": "actual",
+          "why": "「予想を下回る決算を嫌気し１０％急落した」。急落は起きた事実。"
+        }
+      ]
     },
     {
       "id": "doc28_headlines_forecast",
       "raw_file": "raw/doc28_headlines_forecast.txt",
-      "note": "本当に予想を語る文。報告Bの修正で actual に転んではいけない側。",
-      "expected_value_type": "forecast"
+      "note": "本当に予想を語る文。報告Bの修正で actual に転んではいけない側。12件すべて forecast のままであることを固定する。",
+      "expectations": [
+        {
+          "line": 0,
+          "raw": "84.1兆ウォン",
+          "value_type": "forecast",
+          "why": "「コンセンサス予想によると…見通しで」。宣言語がある。"
+        },
+        {
+          "line": 0,
+          "raw": "576億ドル",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 0,
+          "raw": "64.1兆ウォン",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 1,
+          "raw": "83.85兆ウォン",
+          "value_type": "forecast",
+          "why": "「事前予想における…中央値」「見込まれており」。"
+        },
+        {
+          "line": 1,
+          "raw": "9.4兆円",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 1,
+          "raw": "64.22兆ウォン",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 1,
+          "raw": "7.2兆円",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 2,
+          "raw": "20%",
+          "value_type": "forecast",
+          "why": "「…と予想する」「見通しで」。"
+        },
+        {
+          "line": 2,
+          "raw": "30%",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 3,
+          "raw": "278.6％",
+          "value_type": "forecast",
+          "why": "「…となる見通し」。「過去最高」に引きずられて actual にしてはいけない。"
+        },
+        {
+          "line": 3,
+          "raw": "597.3％",
+          "value_type": "forecast",
+          "why": "同上。"
+        },
+        {
+          "line": 3,
+          "raw": "76.3％",
+          "value_type": "forecast",
+          "why": "「…と予想されている」。"
+        }
+      ]
     }
   ]
 }

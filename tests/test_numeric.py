@@ -1572,3 +1572,72 @@ class TestOhlcTimeSeries(unittest.TestCase):
         # 1ページで数十件になり、台帳の上限とプロンプト予算を食い潰すため
         led = self.numeric.collect_from_text(self.raw, source="fetch_url(yahoo)")
         self.assertEqual([f for f in led if f["kind"] == "number"], [])
+
+
+class TestHeadlineValueType(unittest.TestCase):
+    """
+    実LLM検証で拾った実物の見出し・本文で、実績/予想の型付けを1件ずつ固定する。
+
+    「予想を下回った」は予想の話ではなく実績の話なのに、単に「予想」という
+    語が入っているだけで forecast になっていた（報告B）。期待値は
+    noisy_sources.json の expectations 側に置き、テストはそれを読むだけに
+    する。どの数値をどう判定すべきかは実装の都合ではなくデータの性質なので、
+    データと一緒に置いておかないと後から動かされてしまう。
+
+    unknown を期待している4件は「まだ決められないので unknown が正解」。
+    実績と書けるだけの語がその文に無いものを、雰囲気で actual にはしない。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        self.numeric = numeric
+
+    def _lines(self, case_id):
+        case, raw = _raw_fixture(case_id)
+        return case, raw.splitlines()
+
+    def _check(self, case_id):
+        case, lines = self._lines(case_id)
+        wrong = []
+        for exp in case["expectations"]:
+            line = lines[exp["line"]]
+            sentence = self.numeric.sentence_containing(line, exp["raw"])
+            self.assertTrue(sentence,
+                            f"{case_id} L{exp['line']} の {exp['raw']} を含む文が取れない")
+            got = self.numeric.classify_value_type(sentence)
+            if got != exp["value_type"]:
+                wrong.append(f"L{exp['line']} {exp['raw']}: "
+                             f"{exp['value_type']} を期待したが {got} "
+                             f"（{exp['why']}）")
+        self.assertEqual(wrong, [], "\n".join([""] + wrong))
+
+    def test_実績を報じる文の型付け(self):
+        self._check("doc28_headlines_actual")
+
+    def test_予想を語る文の型付け(self):
+        self._check("doc28_headlines_forecast")
+
+    def test_期待値の内訳が実測どおりに固定されている(self):
+        # 期待値そのものが後から緩められていないかを見る。
+        # 「テストは通るが期待値が下がっていた」を防ぐための番人。
+        case = _noisy("doc28_headlines_actual")
+        counts = {}
+        for exp in case["expectations"]:
+            counts[exp["value_type"]] = counts.get(exp["value_type"], 0) + 1
+        self.assertEqual(counts, {"actual": 9, "unknown": 3, "forecast": 1})
+
+        fc = _noisy("doc28_headlines_forecast")
+        self.assertEqual(len(fc["expectations"]), 12)
+        self.assertTrue(all(e["value_type"] == "forecast" for e in fc["expectations"]))
+
+    def test_期待値が実物の数値をもれなく覆っている(self):
+        # 抽出できた数値だけを都合よく拾っていないか。
+        for case_id in ("doc28_headlines_actual", "doc28_headlines_forecast"):
+            case, lines = self._lines(case_id)
+            listed = {(e["line"], e["raw"]) for e in case["expectations"]}
+            found = set()
+            for i, line in enumerate(lines):
+                for x in self.numeric.extract_numbers(line):
+                    found.add((i, x["raw"]))
+            self.assertEqual(found, listed, f"{case_id} の期待値が実物と食い違う")
