@@ -15,6 +15,7 @@ class AgentState(TypedDict):
     last_tool_name: str       # 直前に呼んだツール名（action_type=="tool"の場合のみ）
     tool_verify_count: int    # verify_toolノードを通った回数（step_countとは別管理）
     max_tool_verifies: int    # verify_toolノードの最大実行回数
+    findings: list[dict]      # 検索結果から機械抽出した数値・日付。履歴トリミングの対象外
 
 
 def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
@@ -43,4 +44,5 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "last_tool_name": "",
         "tool_verify_count": 0,
         "max_tool_verifies": max_tool_verifies,
+        "findings": [],
     }

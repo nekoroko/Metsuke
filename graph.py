@@ -6,10 +6,33 @@ from state import AgentState
 from tools import get_tool_fn, get_tool_names, build_workspace_context, is_tool_verifiable
 from sandbox import execute_in_sandbox, PROFILE_AGENT_CODE
 from reviewers import dispatch_reviewers, run_reviewers, aggregate_results
+from numeric import collect_from_text, merge_findings, format_findings
 from datetime import datetime
 
 
-def build_system_prompt(step_count: int = 0, max_steps: int = 10, reasoning_detected: bool = False) -> str:
+def _findings_section(findings: list) -> str:
+    """
+    数値台帳をプロンプトへ埋め込む節を作る。
+
+    履歴は MAX_HISTORY_ROUNDS で切り詰められるため、古いステップで得た数値は
+    DONE を書く時点では見えなくなっている。実測では、検索結果にあった株価の
+    下落率（-7.47%）が窓の外に落ち、最終回答から丸ごと欠落していた。
+    台帳は数値と日付だけを保持しトリミングしないので、この欠落を防げる。
+    """
+    body = format_findings(findings or [])
+    if not body:
+        return ""
+    return (
+        "## これまでに取得した数値・日付\n"
+        "以下は、これまでの検索結果から機械的に抜き出したものです。原文のままなので、\n"
+        "回答に書くときはこの表記を変えないでください（単位も変換しないこと）。\n"
+        f"{body}\n\n"
+    )
+
+
+def build_system_prompt(step_count: int = 0, max_steps: int = 10,
+                        reasoning_detected: bool = False,
+                        findings: list = None) -> str:
     """システムプロンプトを構築する（残りステップ数に応じて収束指示を強める）"""
     tool_names = get_tool_names()
     workspace = build_workspace_context()
@@ -77,6 +100,7 @@ def build_system_prompt(step_count: int = 0, max_steps: int = 10, reasoning_dete
         "または定型的な前処理が必要な場合は、run_saved_tool を活用してください。\n"
         "利用可能なツールが分からない時は list_saved_tools で一覧を取得できます。\n\n"
         f"{budget_section}\n"
+        f"{_findings_section(findings)}"
         "## 作業環境\n"
         f"{workspace}\n\n"
         "## 回答形式\n"
@@ -269,7 +293,8 @@ def react_step(state: AgentState) -> AgentState:
 
     messages = [
         {"role": "system", "content": build_system_prompt(
-            state["step_count"], state["max_steps"], reasoning_detected
+            state["step_count"], state["max_steps"], reasoning_detected,
+            state.get("findings"),
         )},
         {"role": "user", "content": f"タスク: {state['task']}"},
     ]
@@ -341,9 +366,21 @@ def react_step(state: AgentState) -> AgentState:
         else:
             result = f"ツール '{tool_name}' は存在しません。generate_codeでPythonコードを生成してください。"
         new_history.append({"role": "result", "content": result})
+
+        # ツール結果から数値・日付を機械抽出して台帳へ積む。
+        # 履歴と違ってトリミングされないので、後のステップでも参照できる。
+        new_findings = merge_findings(
+            state.get("findings", []),
+            collect_from_text(
+                result,
+                source=f"{tool_name}({action['arg']})",
+                step=state["step_count"] + 1,
+            ),
+        )
         return {
             **state,
             "history": new_history,
+            "findings": new_findings,
             "status": "running",
             "step_count": state["step_count"] + 1,
             "reasoning_detected": reasoning_detected,
