@@ -2,7 +2,10 @@
 import os
 from datetime import datetime
 
-from db import add_execution, finish_execution, update_execution_progress
+from db import (
+    add_execution, finish_execution, update_execution_progress,
+    set_execution_graph_kind,
+)
 from sandbox import (
     execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
 )
@@ -12,15 +15,24 @@ import graphs
 WORKSPACE = "/tmp/agent_workspace"
 
 
-def _prepare_agent_run(task_id: str, task_prompt: str, graph_kind: str = None):
+def _prepare_agent_run(exec_id: str, task_id: str, task_prompt: str,
+                       graph_kind: str = None):
     """
     使用するグラフを決めて、そのグラフ用の初期状態を作る。
 
     切り替えの優先順位は 引数 > タスク個別設定 > 設定画面の既定。
     グラフごとにステップ予算が違う（ステートマシンは1ラウンドで
     複数ノード進むため）ので、初期状態の生成もここへ寄せている。
+
+    決まった種別はここでDBへ記録する。実行を開始する側は、どのグラフに
+    なるかを知らないまま exec_id を作っている。記録を呼び出し側に任せると
+    3つの実行経路のどれかで書き漏らす。
     """
     kind = graphs.resolve_kind(task_id, graph_kind)
+    try:
+        set_execution_graph_kind(exec_id, kind)
+    except Exception:
+        pass          # 記録は表示用。失敗しても実行は続ける
     return kind, graphs.get_app(kind), graphs.make_state(kind, task_prompt)
 
 
@@ -129,7 +141,7 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
 
     try:
         _kind, agent_app, initial_state = _prepare_agent_run(
-            task_id, task_prompt, graph_kind)
+            exec_id, task_id, task_prompt, graph_kind)
 
         final_state = None
         for step in agent_app.stream(initial_state):
@@ -218,7 +230,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None,
                 task_prompt = task_prompt + "\n" + tool_context
 
         _kind, agent_app, initial_state = _prepare_agent_run(
-            task_id, task_prompt, graph_kind)
+            exec_id, task_id, task_prompt, graph_kind)
 
         final_state = None
         for step in agent_app.stream(initial_state):
@@ -278,6 +290,11 @@ def parse_history_for_display(history: list) -> list:
             done_m = _re.search(r"DONE:\s*(.+)", content, _re.DOTALL)
             if done_m:
                 info["done"] = done_m.group(1).strip()
+            if not any(k in info for k in ("thought", "action", "done")):
+                # ステートマシンの plan ノードなど、THOUGHT/ACTION を
+                # 書かない発話もある。何も表示されないと空行になるため、
+                # 本文をそのまま出す
+                info["text"] = content.strip()
             steps.append(info)
         elif role == "result":
             steps.append({"step": step_num, "role": "result", "result": content})
@@ -294,7 +311,7 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str,
 
     try:
         _kind, agent_app, initial_state = _prepare_agent_run(
-            task_id, task_prompt, graph_kind)
+            exec_id, task_id, task_prompt, graph_kind)
 
         import re as _re
 

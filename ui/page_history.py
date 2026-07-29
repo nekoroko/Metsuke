@@ -6,6 +6,7 @@ import json
 
 import streamlit as st
 
+import graphs
 from db import get_executions
 from trace_view import (
     format_trace_lines,
@@ -48,7 +49,9 @@ def build_export_text(execution: dict, history: list = None, trace: list = None)
         lines += format_trace_lines(trace)
 
     if history:
-        lines += ["", f"## ReActループ履歴（{len(history)}件）"]
+        # 見出しは実行に使ったグラフの名前にする。ReAct固定ではなくなったため
+        lines += ["", f"## {graphs.log_title(e.get('graph_kind'), trace)}"
+                      f"（{len(history)}件）"]
         for i, entry in enumerate(history, 1):
             role = entry.get("role", "")
             content = entry.get("content", "")
@@ -95,7 +98,7 @@ def render():
             t_icon = "🔧" if e["exec_type"] == "tool" else "🧠"
             t_label = {"manual": "手動", "schedule": "定期"}.get(e["trigger"], e["trigger"])
 
-            # 実行結果はカードで表示し、出力・エラー・ReAct履歴を
+            # 実行結果はカードで表示し、出力・エラー・実行ログを
             # それぞれ折りたたみに分ける。以前は全体が1つのexpanderに
             # 入っていたため、一覧の時点では状態や所要時間が読めなかった。
             try:
@@ -103,13 +106,17 @@ def render():
             except (json.JSONDecodeError, TypeError):
                 history = None
             trace = parse_trace(e.get("trace"))
+            # 実行ログの呼び名は、その実行で使ったグラフの名前にそろえる
+            run_name = graphs.run_label(e.get("graph_kind"), trace)
+            log_name = graphs.log_title(e.get("graph_kind"), trace)
+            graph_badge = f' {badge("muted", run_name)}' if run_name else ""
 
             with st.container(border=True):
                 head_l, head_r = st.columns([5, 2])
                 with head_l:
                     st.markdown(
                         f'<p class="as-card-title">{t_icon} {e.get("target_name", "?")} '
-                        f'{badge(e["status"])} {badge("muted", t_label)}</p>'
+                        f'{badge(e["status"])} {badge("muted", t_label)}{graph_badge}</p>'
                         f'<p class="as-meta">開始 {e["started_at"][:19]}'
                         + (f' / 完了 {e["finished_at"][:19]}' if e.get("finished_at") else "")
                         + "</p>",
@@ -152,7 +159,7 @@ def render():
                                         f"{entry.get('note') or entry.get('summary', '')}"
                                     )
                 if history:
-                    with st.expander(f"🔁 ReActループ履歴（{len(history)}件）", expanded=False):
+                    with st.expander(f"🔁 {log_name}（{len(history)}件）", expanded=False):
                         for entry in history:
                             if entry["role"] == "assistant":
                                 st.markdown(f"🤖 {entry['content']}")
@@ -162,7 +169,7 @@ def render():
                     export_text = build_export_text(e, history, trace)
                     with st.expander("📋 まとめてコピー", expanded=False):
                         st.caption(
-                            "結果・ノード遷移・ReActループ履歴を1つのテキストに"
+                            f"結果・ノード遷移・{log_name}を1つのテキストに"
                             "まとめています。右上のコピーアイコンで全体をコピーできます。"
                         )
                         st.code(export_text, language="markdown")

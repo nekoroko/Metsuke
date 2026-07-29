@@ -16,6 +16,12 @@ GRAPH_LABELS = {
     RESEARCH: "リサーチ（ステートマシン）",
 }
 
+# 実行履歴の見出しなど、狭い場所で使う短い名前
+GRAPH_SHORT_LABELS = {
+    REACT: "ReActループ",
+    RESEARCH: "リサーチ工程",
+}
+
 GRAPH_DESCRIPTIONS = {
     REACT: "毎ステップLLMが次の行動を決める。コード生成・ファイル操作・"
            "保存済みツールの実行など、手順が読めない作業向け。",
@@ -72,6 +78,42 @@ def get_app(kind: str):
         return research_app
     from graph import app as react_app
     return react_app
+
+
+# ステートマシンにしか存在しないノード。graph_kind を保存する前に実行された
+# 履歴でも、ノード遷移からどちらのグラフだったかを言い当てられる。
+_RESEARCH_ONLY_NODES = {"plan", "digest", "gap", "compose"}
+
+
+def kind_from_trace(trace) -> str:
+    """ノード遷移の記録からグラフ種別を推定する。判別できなければ空文字。"""
+    nodes = {e.get("node") for e in (trace or []) if isinstance(e, dict)}
+    if nodes & _RESEARCH_ONLY_NODES:
+        return RESEARCH
+    if "react" in nodes:
+        return REACT
+    return ""
+
+
+def run_label(graph_kind: str = None, trace=None) -> str:
+    """
+    その実行で使ったグラフの名前。判別できなければ空文字。
+
+    保存された graph_kind を優先し、無ければノード遷移から推定する。
+    ReAct固定だった頃の履歴に後から「ReActループ」と書くのは正しいが、
+    判別できないものにまで書けば嘘になるので、そこは名乗らせない。
+    """
+    kind = (graph_kind or "").strip()
+    if kind in GRAPH_SHORT_LABELS:
+        return GRAPH_SHORT_LABELS[kind]
+    inferred = kind_from_trace(trace)
+    return GRAPH_SHORT_LABELS[inferred] if inferred else ""
+
+
+def log_title(graph_kind: str = None, trace=None) -> str:
+    """実行ログの見出し。グラフ名が分かればそれを冠する。"""
+    label = run_label(graph_kind, trace)
+    return f"{label}のログ" if label else "実行ログ"
 
 
 def make_state(kind: str, task_prompt: str):

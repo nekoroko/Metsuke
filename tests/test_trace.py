@@ -78,6 +78,32 @@ class TestFormatting(unittest.TestCase):
         self.assertEqual(skipped_count([]), 0)
 
 
+class TestRunLabel(unittest.TestCase):
+    """実行ログの呼び名は、その実行で使ったグラフの名前になる"""
+
+    RESEARCH_TRACE = [
+        {"seq": 1, "node": "plan", "next": "search"},
+        {"seq": 2, "node": "compose", "next": "correct"},
+    ]
+
+    def test_saved_kind_wins(self):
+        import graphs
+        self.assertEqual(graphs.run_label(graphs.RESEARCH), "リサーチ工程")
+        self.assertEqual(graphs.run_label(graphs.REACT), "ReActループ")
+        self.assertEqual(graphs.log_title(graphs.RESEARCH), "リサーチ工程のログ")
+
+    def test_inferred_from_trace_when_kind_missing(self):
+        import graphs
+        self.assertEqual(graphs.run_label(None, self.RESEARCH_TRACE), "リサーチ工程")
+        self.assertEqual(graphs.run_label("", SAMPLE), "ReActループ")
+
+    def test_no_name_claimed_when_unknown(self):
+        import graphs
+        self.assertEqual(graphs.run_label(None, []), "")
+        self.assertEqual(graphs.run_label("nonsense", []), "")
+        self.assertEqual(graphs.log_title(None, []), "実行ログ")
+
+
 class TestExportText(unittest.TestCase):
     def test_trace_section_included(self):
         from ui.page_history import build_export_text
@@ -87,7 +113,17 @@ class TestExportText(unittest.TestCase):
         self.assertIn("## ノード遷移（2件）", text)
         self.assertIn("[スキップ]", text)
         # ノード遷移は履歴より前に置く
-        self.assertLess(text.index("## ノード遷移"), text.index("## ReActループ履歴"))
+        self.assertLess(text.index("## ノード遷移"), text.index("## ReActループのログ"))
+
+    def test_history_heading_uses_graph_name(self):
+        import graphs
+        from ui.page_history import build_export_text
+        exec_row = {"id": "abc", "target_name": "調査", "status": "done",
+                    "started_at": "2026-07-29T10:00:00", "stdout": "本文",
+                    "graph_kind": graphs.RESEARCH}
+        text = build_export_text(exec_row, [{"role": "assistant", "content": "計画"}], None)
+        self.assertIn("## リサーチ工程のログ（1件）", text)
+        self.assertNotIn("ReActループ", text)
 
     def test_no_trace_no_section(self):
         from ui.page_history import build_export_text
@@ -125,6 +161,17 @@ class TestPersistence(unittest.TestCase):
         self.db.finish_execution(eid, "done", stdout="本文", history=[], trace=SAMPLE)
         row = self.db.get_execution(eid)
         self.assertEqual(parse_trace(row["trace"]), SAMPLE)
+
+    def test_graph_kind_is_recorded(self):
+        eid = self._new_exec()
+        self.db.set_execution_graph_kind(eid, "research")
+        self.assertEqual(self.db.get_execution(eid)["graph_kind"], "research")
+
+    def test_error_finish_keeps_graph_kind(self):
+        eid = self._new_exec()
+        self.db.set_execution_graph_kind(eid, "research")
+        self.db.finish_execution(eid, "error", stderr="落ちた")
+        self.assertEqual(self.db.get_execution(eid)["graph_kind"], "research")
 
     def test_error_finish_keeps_progress_trace(self):
         eid = self._new_exec()

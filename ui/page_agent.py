@@ -129,7 +129,13 @@ def render():
                         status = exec_data["status"]
                         s_icon = {"done": "✅", "error": "❌", "running": "⏳"}.get(status, "❓")
                         st.markdown(f"### {s_icon} ステータス: {status}")
-                        st.caption(f"exec_id: {running_exec_id} | 開始: {exec_data['started_at'][:19]}")
+                        run_trace = parse_trace(exec_data.get("trace"))
+                        run_name = graphs.run_label(exec_data.get("graph_kind"), run_trace)
+                        st.caption(
+                            f"exec_id: {running_exec_id}"
+                            + (f" | グラフ: {run_name}" if run_name else "")
+                            + f" | 開始: {exec_data['started_at'][:19]}"
+                        )
                         if exec_data.get("finished_at"):
                             st.caption(f"完了: {exec_data['finished_at'][:19]}")
 
@@ -138,7 +144,7 @@ def render():
                             try:
                                 history = json.loads(exec_data["history"])
                                 steps = parse_history_for_display(history)
-                                st.markdown("#### 実行ログ")
+                                st.markdown(f"#### {graphs.log_title(exec_data.get('graph_kind'), run_trace)}")
                                 for info in steps:
                                     step_num = info["step"]
                                     role = info["role"]
@@ -149,6 +155,8 @@ def render():
                                             st.write(f"　🔧 `{info['action']}`")
                                         if info.get("done"):
                                             st.write(f"　✅ DONE")
+                                        if info.get("text"):
+                                            st.write(f"**Step {step_num}** 📝 {info['text']}")
                                     elif role == "result":
                                         with st.expander(f"Step {step_num} 結果", expanded=False):
                                             st.code(info.get("result", ""))
@@ -156,7 +164,7 @@ def render():
                                 pass
 
                         # ノード遷移（実行中も進捗と一緒に書き込まれる）
-                        trace = parse_trace(exec_data.get("trace"))
+                        trace = run_trace
                         if trace:
                             skipped = skipped_count(trace)
                             label = f"🔀 ノード遷移（{len(trace)}件"

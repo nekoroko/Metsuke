@@ -75,15 +75,20 @@ def init_db():
             stderr      TEXT,
             history     TEXT,
             trace       TEXT,
+            graph_kind  TEXT,
             started_at  TEXT,
             finished_at TEXT
         )
     """)
 
-    # 既存DBに trace が無ければ追加する（agent_tasks と同じマイグレーション方式）
+    # 既存DBに列が無ければ追加する（agent_tasks と同じマイグレーション方式）
     cursor = conn.execute("PRAGMA table_info(executions)")
-    if "trace" not in [row[1] for row in cursor.fetchall()]:
+    exec_cols = [row[1] for row in cursor.fetchall()]
+    if "trace" not in exec_cols:
         conn.execute("ALTER TABLE executions ADD COLUMN trace TEXT")
+    # どのグラフで実行したか。履歴画面の見出しに使う
+    if "graph_kind" not in exec_cols:
+        conn.execute("ALTER TABLE executions ADD COLUMN graph_kind TEXT")
 
     # AI生成セッション
     conn.execute("""
@@ -344,6 +349,20 @@ def add_execution(exec_type, target_id, target_name, trigger="manual", schedule_
     conn.commit()
     conn.close()
     return exec_id
+
+def set_execution_graph_kind(exec_id: str, graph_kind: str):
+    """
+    その実行で使ったグラフを記録する。
+
+    実行を開始する側（scheduler / UI）はどのグラフになるか知らない
+    ことがある（タスクの指定と設定の既定で決まるため）。解決した直後の
+    executor から呼ぶ。
+    """
+    conn = get_connection()
+    conn.execute("UPDATE executions SET graph_kind = ? WHERE id = ?",
+                 (graph_kind or None, exec_id))
+    conn.commit()
+    conn.close()
 
 def update_execution_progress(exec_id: str, history: list, trace: list = None):
     """実行中の履歴とノード遷移を逐次更新する（バックグラウンド実行の進捗用）"""
