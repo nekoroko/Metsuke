@@ -7,15 +7,24 @@ Web GUIからツールを作成・管理し、スケジュール実行できま�
 
 ## 構成
 
-このプロジェクトは2つのリポジトリで構成されています。
+このリポジトリ1つで完結します（以前は `agent-project` / `agent-studio` の
+2リポジトリに分かれていましたが、統合済みです）。
 
 ```
-agent-project/   ReActエージェントのコア（LLM呼び出し、ツール、レビュアー）
-agent-studio/    Web GUI（Streamlit）、DB、スケジューラ
+agent_studio/
+  config.py       LLM接続設定（Local/API切り替え）
+  state.py        エージェントの状態定義
+  tools.py        エージェントが使うツール群
+  graph.py        ReActループ + Critic + 検索品質チェックのグラフ定義
+  reviewers.py    専門家レビュアープール
+  sandbox.py      Podmanサンドボックス実行
+  run.py          CLIから直接実行する場合のエントリポイント
+  db.py           SQLite（ツール、タスク、スケジュール、実行履歴、設定）
+  executor.py     ツール実行・エージェント実行（バックグラウンド対応）
+  ai_creator.py   AIによるツール生成・エラー修正
+  scheduler.py    APSchedulerによる定期実行
+  app.py          Streamlit UI
 ```
-
-`agent-studio` は `sys.path` 経由で `agent-project` を読み込んで動きます。
-`agent-project` 単体でもCLIから直接エージェントを動かせます（`run.py`）。
 
 ## 動作要件
 
@@ -38,7 +47,9 @@ agent-studio/    Web GUI（Streamlit）、DB、スケジューラ
 これに対して以下の耐性機構を実装済みです。動かなくなることは避けられますが、
 快適に使うには8192以上のContext Lengthを推奨します。
 
-- **自動継続**: 応答がトークン上限で切れた場合、続きを自動的に追加取得して結合する
+- **自動継続**: 応答がトークン上限で切れた場合、続きを自動的に追加取得して結合する。
+  本文（content）が空のままトークン上限に達した場合（Thinkingだけで予算を
+  使い切ったケース）は、直前の思考の続きから検討を再開させる形で対応する
 - **ステップ予算に応じた収束制御**: 残りステップ数が少なくなると、新規調査を控えて
   今ある情報をまとめる方向に自動で誘導する
 - **強制収束**: それでもステップ上限に達した場合、今までの情報だけで
@@ -48,27 +59,23 @@ agent-studio/    Web GUI（Streamlit）、DB、スケジューラ
 
 ## セットアップ
 
-### 1. agent-project
-
 ```bash
-cd agent-project
+git clone https://github.com/nekoroko/agent_studio.git
+cd agent_studio
 python3 -m venv .venv
 source .venv/bin/activate   # Windowsは .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 2. agent-studio
-
-```bash
-cd agent-studio
-source ../agent-project/.venv/bin/activate  # venvは共有してOK
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
 ブラウザで `http://localhost:8501` を開きます。
 
-### 3. LLM接続設定
+`requirements.txt` はバージョンを固定していません。`pip freeze` で生成すると、
+開発環境によってはOS付属のシステムパッケージ（PyPIに存在しないもの）が
+混入して `pip install` が失敗することがあるため、あえて実際にimportされている
+パッケージだけを手動でリストしています。
+
+### LLM接続設定
 
 起動後、「⚙️ 設定」タブから接続先を設定してください。
 
@@ -79,8 +86,8 @@ streamlit run app.py
     OpenAI互換レイヤーはAnthropic公式が「本番用途には非推奨」としているため、
     Extended Thinking等の機能をフルに使うにはこちらを推奨
 
-設定は `agent-studio/agent_studio.db` に保存され、`agent-project` 側もこのDBを
-参照するため、一度設定すれば両方に反映されます。
+設定は `agent_studio.db` に保存されます。**このDBファイルにはAPIキーが平文で
+入るため、`.gitignore` で除外済みです。誤ってコミットしないよう注意してください。**
 
 #### ローカルLLMサーバーの選択肢
 
@@ -102,8 +109,7 @@ LM Studioでの動作を主に検証していますが、OpenAI互換APIを持�
 接続先がローカルかAPIかに関わらず、実際の上限は環境ごとに異なります
 （ローカルはサーバー側のContext Length設定次第、APIはモデル・プロバイダ次第）。
 「APIだから大きい値で決め打ち」「ローカルだから小さい値で決め打ち」という
-実装は、環境によって不正確になりズレます（実際、この決め打ちが原因で
-長文レポートが途中で打ち切られる不具合が発生したことがあります）。
+実装は、環境によって不正確になりズレます。
 
 そのため本アプリでは、Local / OpenAI互換API / Anthropic のいずれの設定画面にも
 「最大出力トークン数」の入力欄と「🔌 接続テスト（自動取得を試す）」ボタンを
@@ -116,19 +122,28 @@ LM Studioでの動作を主に検証していますが、OpenAI互換APIを持�
 - **自動取得に失敗した場合は手入力してください。** ローカルならサーバー側の
   設定画面（例: LM Studioの「Load」タブのContext Length）を確認、
   APIなら各プロバイダのドキュメントを確認してください。
-- 値は「⚙️ 設定」タブで保存した内容がそのまま使われます。
-  未設定の場合のみ、コード内の保守的な既定値（ローカル: 1500 / API: 4000）に
-  フォールバックします。
+- 値は「⚙️ 設定」タブで保存した内容がそのまま使われます。未設定の場合のみ、
+  コード内の保守的な既定値（ローカル: 3000 / API: 4000）にフォールバックします。
+  ローカルのデフォルトは以前1500でしたが、Thinking機能を持つモデルで
+  内部思考だけでこの上限を使い切り、実際の回答が空になる不具合が
+  観測されたため、3000に引き上げています。UIでも2500未満に設定すると
+  警告が表示されます。
 
-### 4. 検索プロバイダ設定（任意）
+### 検索プロバイダ設定（任意）
 
 デフォルトはAPIキー不要のDuckDuckGoです。精度を上げたい場合は
-「⚙️ 設定」タブからTavily / Google Custom Search / Brave Searchの
-APIキーを設定できます（未設定時は自動的にDuckDuckGoにフォールバックします）。
+「⚙️ 設定」タブからTavily / Google Custom Search / Brave SearchのAPIキーを
+設定できます（未設定時は自動的にDuckDuckGoにフォールバックします）。
 
 なお、Google Custom Search JSON APIは2026年時点で新規顧客の受付を終了しています。
 既存のプログラム可能検索エンジンをお持ちの方以外は、Tavily または Brave Search を
 推奨します。
+
+**検証の結果、検索プロバイダの差は接続するLLMの強さによって効き方が変わります。**
+性能の高いLLM（Claude等）ではDuckDuckGoでもTavilyでも大差がつきませんでしたが、
+ローカルの小型モデルでは、検索結果に無関係な情報が混入した際にそれを見抜けず
+精度が大きく落ちる傾向が確認されています。ローカルの小型モデル中心で
+運用するなら、有料検索APIの導入を検討する価値があります。
 
 ## 使い方
 
@@ -161,23 +176,31 @@ Type1/Type2どちらのタスクも、cron式で定期実行を登録できま�
 
 ## アーキテクチャの要点
 
-### ReActループ + Critic（専門家レビュアープール）
+### ReActループ + 検索品質チェック + Critic（専門家レビュアープール）
 
 エージェントは以下のループで動作します。
 
 ```
-react（ツール実行・思考） → DONE
-                              ↓
-                        Dispatcher（タスク内容からレビュアーを選定）
-                              ↓
+react（ツール実行・思考）
+  │
+  ├─ ACTION=web_search等（検索系ツール） ──> verify_tool
+  │                                            （検索結果がクエリの意図に
+  │                                             答えているかLLMが軽量判定。
+  │                                             NGなら次に試すクエリを提案
+  │                                             して react に戻す）
+  │
+  └─ ACTION=DONE ──> Dispatcher（タスク内容からレビュアーを選定）
+                            ↓
               fact_checker / code_reviewer / security_reviewer /
               data_analyst / generic_reviewer
-                              ↓
-                   OK → 終了 ／ 要修正 → react に戻る（最大2回）
+                            ↓
+                 OK → 終了 ／ 要修正 → react に戻る（最大2回）
 ```
 
 Criticはエージェント本体とは別のLLM呼び出しで、成果物を批判的にレビューします。
 同じLLMが自分の回答を自己採点するより、役割を分離した方が問題を見つけやすいためです。
+`verify_tool`も同様に、ツール実行結果の評価だけを担う専用のノードとして分離しており、
+`react`側のロジックには手を加えずに検索品質のチェックを追加しています。
 
 ### サンドボックス実行の使い分け
 
@@ -196,29 +219,22 @@ Criticはエージェント本体とは別のLLM呼び出しで、成果物を�
 
 - Windowsネイティブでの動作は現時点で未検証です（WSL2上での利用を推奨）。
   Podman自体はWindows上でLinuxコンテナを起動できるため、大きな障害にはなりません。
-- 検索の精度はDuckDuckGo利用時は限定的です。重要な調査タスクでは
-  Tavily等のAPIキー設定を推奨します。
-- ローカルLLMの推論品質は、モデルサイズ・量子化レベルに強く依存します。
-  複雑な判断・重要度の取捨選択が必要なタスクは、大きいモデルやAPI
-  （Claude/GPT等）の方が精度が高くなる傾向があります。
+- ローカルの小型モデル（E4B等）は、ベンチマーク上の性能とは別軸で、
+  以下のような弱点が実際に観測されています。
+  - **「今何が足りないか」を診断してから次の一手を決める判断力が弱い。**
+    強いモデルは指示しなくてもこれを暗黙にやりますが、小型モデルは
+    言い回しを変えて検索を繰り返すだけになりがちです
+  - **未来の出来事を、断定的な言い切り（完了形）で書いてしまうことがある。**
+    「予想」を語ること自体は正当なタスク要件ですが、まだ起きていないことを
+    「〜しました」と過去形で断定してしまう誤りが観測されています。
+    プロンプトでの指示だけでは確実に防げておらず、既知の限界として
+    残っています
+- これらは主にローカルの小型モデルで起きやすい傾向で、Claude等の
+  性能の高いモデルに切り替えると発生しにくくなります。重要な調査タスクほど、
+  接続するモデルの選択が結果を左右します。
 
-## ディレクトリ構成
+## ライセンス・注意事項
 
-```
-agent-project/
-  config.py       LLM接続設定（Local/API切り替え）
-  state.py        エージェントの状態定義
-  tools.py        エージェントが使うツール群
-  graph.py        ReActループ + Criticのグラフ定義
-  reviewers.py     専門家レビュアープール
-  sandbox.py      Podmanサンドボックス実行
-  run.py          CLIから直接実行する場合のエントリポイント
-
-agent-studio/
-  config.py       LLM接続設定（agent-projectと同一内容）
-  db.py           SQLite（ツール、タスク、スケジュール、実行履歴、設定）
-  executor.py     ツール実行・エージェント実行（バックグラウンド対応）
-  ai_creator.py   AIによるツール生成・エラー修正
-  scheduler.py    APSchedulerによる定期実行
-  app.py          Streamlit UI
-```
+`agent_studio.db` にはLLM/検索APIのAPIキーが平文で保存されます。
+リポジトリをフォーク・公開する際は、このファイルが `.gitignore` で
+除外されていることを必ず確認してください。
