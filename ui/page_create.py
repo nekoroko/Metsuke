@@ -4,6 +4,7 @@
 
 import streamlit as st
 
+import graphs
 from db import add_tool, add_agent_task, get_verified_tools
 from ai_creator import generate_tool
 from ui.common import preview_options, preview_and_fix
@@ -178,8 +179,23 @@ def render():
         else:
             st.caption("保存済みの検証済みツールはまだありません。")
 
+        # 実行グラフ。調査系はステートマシンの方が空回りしにくい
+        at_kind_options = ["default", graphs.REACT, graphs.RESEARCH]
+        at_kind = st.selectbox(
+            "実行グラフ",
+            options=at_kind_options,
+            format_func=lambda k: (
+                f"設定の既定に従う（{graphs.GRAPH_LABELS[graphs.default_kind()]}）"
+                if k == "default" else graphs.GRAPH_LABELS[k]
+            ),
+            help="タスクごとにグラフを固定できます。未指定なら設定画面の既定に従います。",
+        )
+        if at_kind != "default":
+            st.caption(graphs.GRAPH_DESCRIPTIONS[at_kind])
+
         if st.button("🧠 エージェントタスクを登録", type="primary",
                      disabled=not (at_name and at_prompt)):
             tid = add_agent_task(at_name, at_desc, at_prompt,
-                                allowed_tool_ids=selected_tool_ids if selected_tool_ids else None)
+                                allowed_tool_ids=selected_tool_ids if selected_tool_ids else None,
+                                graph_kind=None if at_kind == "default" else at_kind)
             st.success(f"登録完了: {tid}（エージェントタブで実行できます）")

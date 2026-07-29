@@ -70,16 +70,21 @@ def remove_job(schedule_id: str):
     if scheduler.get_job(job_id):
         scheduler.remove_job(job_id)
 
-def run_agent_now(task_id: str, task_name: str, task_prompt: str) -> str:
+def run_agent_now(task_id: str, task_name: str, task_prompt: str,
+                  graph_kind: str = None) -> str:
     """
     エージェントタスクを即時バックグラウンド実行する。
+
+    graph_kind を渡すと、そのグラフで実行する。画面で選び直した直後に
+    保存していなくても、その選択で走らせられるようにするための引数。
+    未指定ならタスクの保存値、それも無ければ設定画面の既定に従う。
     """
     exec_id = add_execution("agent", task_id, task_name, trigger="manual")
     scheduler.add_job(
         run_agent_background,
         trigger='date',
         run_date=datetime.now(),
-        args=[exec_id, task_prompt, task_id],
+        args=[exec_id, task_prompt, task_id, graph_kind],
         id=f"now_{exec_id}",
         replace_existing=False,
     )

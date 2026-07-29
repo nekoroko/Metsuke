@@ -6,6 +6,7 @@ import os
 
 import streamlit as st
 
+import graphs
 from db import get_all_settings, set_settings
 from executor import WORKSPACE
 from sandbox import image_status as sandbox_image_status, ensure_sandbox_image, parse_mounts
@@ -18,8 +19,8 @@ def render():
 
     # 1画面に縦積みすると400行を超えて目的の項目まで到達しづらいため、
     # 設定の対象ごとにタブで分ける。
-    tab_llm, tab_search, tab_sandbox = st.tabs(
-        ["🧠 LLM", "🔍 検索", "📦 サンドボックス"]
+    tab_llm, tab_graph, tab_search, tab_sandbox = st.tabs(
+        ["🧠 LLM", "🔀 グラフ", "🔍 検索", "📦 サンドボックス"]
     )
 
     with tab_llm:
@@ -293,6 +294,46 @@ def render():
                     st.success(f"接続成功: {_resp.content[:100]}")
                 except Exception as e:
                     st.error(f"接続失敗: {e}")
+
+    with tab_graph:
+        st.subheader("実行グラフ")
+        st.caption(
+            "エージェントの動かし方を切り替えます。タスクの内容によって"
+            "向き不向きがあるため、タスクごとの上書き指定もできます"
+            "（🧠 エージェント の各タスク内）。"
+        )
+
+        graph_settings = get_all_settings()
+        kinds = [graphs.REACT, graphs.RESEARCH]
+        current_kind = graphs.normalize_kind(
+            graph_settings.get(graphs.SETTING_KEY, "") or ""
+        )
+        chosen_kind = st.radio(
+            "既定のグラフ",
+            kinds,
+            index=kinds.index(current_kind),
+            format_func=lambda k: graphs.GRAPH_LABELS[k],
+        )
+        st.caption(graphs.GRAPH_DESCRIPTIONS[chosen_kind])
+
+        with st.container(border=True):
+            st.markdown(
+                "**ReActループ**\n\n"
+                "`react → verify_tool / correct → critic`\n\n"
+                "毎ステップLLMが次の行動（ツール実行・コード生成・完了）を決める。\n\n"
+                "**リサーチ（ステートマシン）**\n\n"
+                "`plan → search → digest → gap →（不足なら search へ戻る）→ "
+                "compose → correct → critic`\n\n"
+                "工程が固定で、検索と本文取得はコード側が実行する。"
+                "LLMに任せるのは調査計画・充足判定・執筆の3つだけ。"
+                "書式崩れでステップを空費することがなく、執筆時にプロンプトの枠を"
+                "行動ルールに取られない。ツール実行やコード生成は行わない。"
+            )
+
+        if st.button("💾 グラフ設定を保存"):
+            set_settings({graphs.SETTING_KEY: chosen_kind})
+            st.success("保存しました。次の実行から反映されます。")
+            st.rerun()
 
     with tab_search:
         st.divider()

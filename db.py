@@ -34,6 +34,7 @@ def init_db():
             description TEXT,
             task_prompt TEXT NOT NULL,
             allowed_tool_ids TEXT,
+            graph_kind  TEXT,
             created_at  TEXT,
             updated_at  TEXT
         )
@@ -44,6 +45,9 @@ def init_db():
     cols = [row[1] for row in cursor.fetchall()]
     if "allowed_tool_ids" not in cols:
         conn.execute("ALTER TABLE agent_tasks ADD COLUMN allowed_tool_ids TEXT")
+    # graph_kind: 空/NULLなら設定画面の既定に従う（graphs.resolve_kind）
+    if "graph_kind" not in cols:
+        conn.execute("ALTER TABLE agent_tasks ADD COLUMN graph_kind TEXT")
 
     # スケジュール（Type 1/Type 2両方）
     conn.execute("""
@@ -240,14 +244,15 @@ def delete_tool(tool_id):
 
 # --- エージェントタスク操作 ---
 
-def add_agent_task(name, description, task_prompt, allowed_tool_ids=None):
+def add_agent_task(name, description, task_prompt, allowed_tool_ids=None, graph_kind=None):
     task_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
     conn = get_connection()
     conn.execute(
-        "INSERT INTO agent_tasks (id, name, description, task_prompt, allowed_tool_ids, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_tasks (id, name, description, task_prompt, allowed_tool_ids, graph_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (task_id, name, description, task_prompt,
          json.dumps(allowed_tool_ids) if allowed_tool_ids else None,
+         graph_kind or None,
          now, now)
     )
     conn.commit()
@@ -270,7 +275,7 @@ def update_agent_task(task_id, **kwargs):
     conn = get_connection()
     sets = ["updated_at = ?"]
     vals = [datetime.now().isoformat()]
-    for key in ("name", "description", "task_prompt"):
+    for key in ("name", "description", "task_prompt", "graph_kind"):
         if key in kwargs:
             sets.append(f"{key} = ?")
             vals.append(kwargs[key])

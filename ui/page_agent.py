@@ -6,6 +6,7 @@ import json
 
 import streamlit as st
 
+import graphs
 from db import (
     get_all_agent_tasks, update_agent_task, delete_agent_task,
     get_verified_tools, get_execution,
@@ -73,18 +74,41 @@ def render():
                     )
                     edited_tool_ids = [tool_options_edit[label] for label in selected_labels_edit]
 
+                # 実行グラフ（未指定なら設定画面の既定に従う）
+                kind_options = ["default", graphs.REACT, graphs.RESEARCH]
+                current_kind = (t.get("graph_kind") or "default").strip() or "default"
+                if current_kind not in kind_options:
+                    current_kind = "default"
+                edited_kind = st.selectbox(
+                    "実行グラフ",
+                    options=kind_options,
+                    index=kind_options.index(current_kind),
+                    format_func=lambda k: (
+                        f"設定の既定に従う（{graphs.GRAPH_LABELS[graphs.default_kind()]}）"
+                        if k == "default" else graphs.GRAPH_LABELS[k]
+                    ),
+                    key=f"agk_{t['id']}",
+                )
+                if edited_kind != "default":
+                    st.caption(graphs.GRAPH_DESCRIPTIONS[edited_kind])
+
                 col1, col2, col3 = st.columns(3)
                 run_clicked = col1.button("▶ 実行（バックグラウンド）", key=f"ar_{t['id']}")
                 save_clicked = False
                 prompt_changed = edited_prompt != t["task_prompt"]
                 tools_changed = set(edited_tool_ids) != set(current_tool_ids)
-                if prompt_changed or tools_changed:
+                kind_changed = edited_kind != current_kind
+                if prompt_changed or tools_changed or kind_changed:
                     save_clicked = col2.button("💾 保存", key=f"as_{t['id']}")
                 delete_clicked = col3.button("🗑️", key=f"ad_{t['id']}")
 
                 # 実行ボタン押下時：ジョブを投入してexec_idをセッションに保存
+                # 未保存でも、いま画面で選んでいるグラフで走らせる
                 if run_clicked:
-                    exec_id = run_agent_now(t["id"], t["name"], edited_prompt)
+                    exec_id = run_agent_now(
+                        t["id"], t["name"], edited_prompt,
+                        graph_kind=None if edited_kind == "default" else edited_kind,
+                    )
                     st.session_state[f"running_exec_{t['id']}"] = exec_id
                     st.success(f"バックグラウンド実行を開始しました（exec_id: {exec_id}）")
                     st.caption("「進捗を更新」ボタンを押して状態を確認できます。ブラウザを閉じても処理は継続します。")
@@ -163,6 +187,7 @@ def render():
                         t["id"],
                         task_prompt=edited_prompt,
                         allowed_tool_ids=edited_tool_ids if edited_tool_ids else None,
+                        graph_kind=None if edited_kind == "default" else edited_kind,
                     )
                     st.rerun()
                 if delete_clicked:

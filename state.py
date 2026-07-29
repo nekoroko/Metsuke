@@ -21,10 +21,18 @@ class AgentState(TypedDict):
     trace: list[dict]         # ノードの実行履歴（どこから来て何をして次はどこか）
     correction_count: int     # correctノードを通った回数
     max_corrections: int      # 訂正の差し戻し上限
+    # --- ここから下はリサーチ用ステートマシン（graph_research.py）でのみ使う ---
+    plan_items: list[dict]    # 調査項目 {"id","question","query","status","hits"}
+    research_round: int       # 検索ラウンド数
+    max_rounds: int           # 検索ラウンドの上限
+    queries_done: list[str]   # 実行済みクエリ（同じクエリの空回りを防ぐ）
+    compose_count: int        # レポートを書いた回数（差し戻しを含む）
+    max_composes: int         # レポート執筆の上限
 
 
 def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
-                       max_tool_verifies: int = 6, max_corrections: int = 2) -> AgentState:
+                       max_tool_verifies: int = 6, max_corrections: int = 2,
+                       max_rounds: int = 3, max_composes: int = 3) -> AgentState:
     """
     エージェントの初期状態を生成する。
 
@@ -55,4 +63,10 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "trace": [],
         "correction_count": 0,
         "max_corrections": max_corrections,
+        "plan_items": [],
+        "research_round": 0,
+        "max_rounds": max_rounds,
+        "queries_done": [],
+        "compose_count": 0,
+        "max_composes": max_composes,
     }

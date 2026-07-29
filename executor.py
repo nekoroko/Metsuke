@@ -6,9 +6,22 @@ from db import add_execution, finish_execution, update_execution_progress
 from sandbox import (
     execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
 )
-from state import make_initial_state
+from state import make_initial_state  # noqa: F401  （外部から参照されている）
+import graphs
 
 WORKSPACE = "/tmp/agent_workspace"
+
+
+def _prepare_agent_run(task_id: str, task_prompt: str, graph_kind: str = None):
+    """
+    使用するグラフを決めて、そのグラフ用の初期状態を作る。
+
+    切り替えの優先順位は 引数 > タスク個別設定 > 設定画面の既定。
+    グラフごとにステップ予算が違う（ステートマシンは1ラウンドで
+    複数ノード進むため）ので、初期状態の生成もここへ寄せている。
+    """
+    kind = graphs.resolve_kind(task_id, graph_kind)
+    return kind, graphs.get_app(kind), graphs.make_state(kind, task_prompt)
 
 
 def _extract_done_text(history: list) -> str:
@@ -104,22 +117,22 @@ def run_tool(tool_id: str, tool_name: str, code: str,
 
 
 def run_agent(task_id: str, task_name: str, task_prompt: str,
-              trigger: str = "manual", schedule_id: str = None) -> dict:
+              trigger: str = "manual", schedule_id: str = None,
+              graph_kind: str = None) -> dict:
     """
-    Type 2: ReActエージェントにタスクを投げる（LLM必要）
-    agent-projectのgraph.pyを呼び出す。
+    Type 2: エージェントにタスクを投げる（LLM必要）
+    ReAct（graph.py）かリサーチ用ステートマシン（graph_research.py）を
+    設定に従って選ぶ。
     """
     os.makedirs(WORKSPACE, exist_ok=True)
     exec_id = add_execution("agent", task_id, task_name, trigger, schedule_id)
 
     try:
-        # agent-projectをPythonパスに追加
-        from graph import app as react_app
-
-        initial_state = make_initial_state(task_prompt)
+        _kind, agent_app, initial_state = _prepare_agent_run(
+            task_id, task_prompt, graph_kind)
 
         final_state = None
-        for step in react_app.stream(initial_state):
+        for step in agent_app.stream(initial_state):
             for node_name, state in step.items():
                 final_state = state
 
@@ -190,25 +203,25 @@ def _build_tool_context(task_id: str) -> str:
     return "\n".join(lines)
 
 
-def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None):
+def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None,
+                         graph_kind: str = None):
     """
     Type 2のバックグラウンド実行版。
     APSchedulerから呼ばれ、各ステップごとにDBの進捗を更新する。
     task_idが指定されていれば、許可ツール情報をプロンプトに注入する。
     """
     try:
-        from graph import app as react_app
-
         # 許可ツール情報をプロンプトに注入
         if task_id:
             tool_context = _build_tool_context(task_id)
             if tool_context:
                 task_prompt = task_prompt + "\n" + tool_context
 
-        initial_state = make_initial_state(task_prompt)
+        _kind, agent_app, initial_state = _prepare_agent_run(
+            task_id, task_prompt, graph_kind)
 
         final_state = None
-        for step in react_app.stream(initial_state):
+        for step in agent_app.stream(initial_state):
             for node_name, state in step.items():
                 final_state = state
                 # 各ステップごとにDBに進捗を保存
@@ -271,7 +284,8 @@ def parse_history_for_display(history: list) -> list:
     return steps
 
 
-def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
+def run_agent_streaming(task_id: str, task_name: str, task_prompt: str,
+                        graph_kind: str = None):
     """
     Type 2のストリーミング版。UIでリアルタイム表示に使う。
     """
@@ -279,14 +293,13 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
     exec_id = add_execution("agent", task_id, task_name, trigger="manual")
 
     try:
-        from graph import app as react_app
-
-        initial_state = make_initial_state(task_prompt)
+        _kind, agent_app, initial_state = _prepare_agent_run(
+            task_id, task_prompt, graph_kind)
 
         import re as _re
 
         final_state = None
-        for step in react_app.stream(initial_state):
+        for step in agent_app.stream(initial_state):
             for node_name, state in step.items():
                 final_state = state
                 step_info = {"step": state["step_count"], "status": state["status"]}

@@ -9,10 +9,18 @@ import json
 # ノード名は内部の識別子そのままだと何をする場所か分かりにくいので、
 # 画面ではアイコンと役割を添える。
 NODE_LABELS = {
+    # ReActループ（graph.py）
     "react": "🤖 react（思考・行動）",
     "verify_tool": "🔍 verify_tool（ツール結果の検算）",
+    # 両方で使う
     "correct": "🛠 correct（数値の自動検証）",
     "critic": "🧐 critic（レビュー）",
+    # リサーチ用ステートマシン（graph_research.py）
+    "plan": "🗂 plan（調査項目の分解）",
+    "search": "🔎 search（検索）",
+    "digest": "📄 digest（本文取得・抜粋）",
+    "gap": "🧭 gap（充足判定）",
+    "compose": "✍️ compose（レポート執筆）",
 }
 
 _END = "(終了)"
