@@ -699,6 +699,116 @@ class TestBudgetInvariantGenerality(unittest.TestCase):
         self.assertEqual(out["compose_count"], 0)                      # 枠の消費は執筆側で1回だけ
 
 
+class TestBudgetInvariantBySimulation(unittest.TestCase):
+    """
+    式の再検証を、算術ではなくループを回して行う（M3）。
+
+    `TestBudgetInvariantGenerality` の総当たりは `1+c+k >= 1+c+k` を
+    確かめているだけで、実際に何回 compose されるかは見ていない。
+    `correction_count` を「差し戻した分岐だけ数える」に変えたことで
+    correct の実消費が増える方向になったため、ここでは本物のノードで
+    compose → correct → critic を回し、消費の実測値を見る。
+
+    最悪ケースを作るために、correct も critic も必ず指摘を出す状態にする。
+    実運用では差し戻しの抑制（同じ本文なら諦める等）が効いて、ここまで
+    使い切らない。抑制に頼らず式が成り立つことを確かめるのが目的。
+    """
+
+    def setUp(self):
+        import graph
+        self.graph = graph
+        self._orig = (graph.numeric_checker, graph.dispatch_reviewers,
+                      graph.run_reviewers, gr._ask)
+
+    def tearDown(self):
+        (self.graph.numeric_checker, self.graph.dispatch_reviewers,
+         self.graph.run_reviewers, gr._ask) = self._orig
+
+    def _always_complains(self):
+        drafts = {"i": 0}
+
+        def draft(*a, **k):
+            drafts["i"] += 1
+            return f"DONE: 売上高は{100 + drafts['i']}兆ウォン [実績] でした。"
+
+        gr._ask = draft
+        self.graph.numeric_checker = lambda **k: {
+            "verdict": "NEEDS_REVISION", "issues": ["数値が出典と合わない"],
+            "instruction": "その数値を削除してください"}
+        self.graph.dispatch_reviewers = lambda *a, **k: ["fact_checker"]
+        self.graph.run_reviewers = lambda *a, **k: [
+            {"reviewer": "fact_checker", "verdict": "NEEDS_REVISION",
+             "issues": ["出典と食い違う"], "instruction": "削除する"}]
+
+    def _run(self, corrections, critiques, max_steps=18):
+        budgets = graphs._enforce_budget_invariant({
+            "max_corrections": corrections, "max_critiques": critiques,
+            "reserve_compose_for_critic": 1})
+        state = make_initial_state("決算", max_steps=max_steps, **budgets)
+        state["history"] = [{"role": "result", "content": "売上高は22.3兆ウォンだった。"}]
+        self._always_complains()
+
+        node = "compose"
+        for _ in range(80):      # 遷移が閉じなくてもテストが止まらないようにする
+            if node == "compose":
+                state = gr.compose_step(state)
+                node = gr.route_after_compose(state)
+            elif node == "correct":
+                state = gr.correct_sm_step(state)
+                node = gr.route_after_correct(state)
+            elif node == "critic":
+                state = gr.critic_sm_step(state)
+                node = gr.route_after_critic(state)
+            else:
+                break
+            state["step_count"] = state.get("step_count", 0) + 1
+            if node in (gr.END, "__end__"):
+                break
+        return state, budgets
+
+    def test_総当たりで枠が足りる(self):
+        for c in range(0, 4):
+            for k in range(0, 4):
+                with self.subTest(corrections=c, critiques=k):
+                    st, b = self._run(c, k)
+                    self.assertLessEqual(
+                        st["compose_count"], b["max_composes"],
+                        "compose の実消費が式の枠を超えた")
+                    # 上限そのものも守られているか（片方が食い合っていないか）
+                    self.assertLessEqual(st["correction_count"], c)
+                    self.assertLessEqual(st["critique_count"], k)
+
+    def test_総当たりでcompose枠切れが起きない(self):
+        # 枠が尽きて compose が素通りする／critic が指摘を捨てる、のどちらも
+        # 起きてはいけない。doc27 で実際に起きた壊れ方がこれ。
+        for c in range(0, 4):
+            for k in range(0, 4):
+                with self.subTest(corrections=c, critiques=k):
+                    st, _ = self._run(c, k)
+                    trace = st.get("trace", [])
+                    self.assertFalse(
+                        [t for t in trace if "執筆枠が残っていない" in (t.get("summary") or "")],
+                        "critic が compose 枠切れで指摘を捨てた")
+                    self.assertFalse(
+                        [t for t in trace
+                         if t.get("node") == "compose" and t.get("skipped")],
+                        "compose が上限に当たって素通りした")
+
+    def test_差し戻せなかった指摘は必ず注記に残る(self):
+        # 枠でも歩数でも止まったとき、指摘が黙って消えないこと
+        st, _ = self._run(1, 1, max_steps=6)
+        self.assertTrue(st.get("verification_notes"))
+
+    def test_実消費は式の値と一致する(self):
+        # 式が「足りる」だけでなく「無駄に多くない」ことも見る。
+        # 余分に積むと、そのぶん遅くなりトークンも食う。
+        for c, k in ((0, 0), (1, 1), (2, 2)):
+            with self.subTest(corrections=c, critiques=k):
+                st, b = self._run(c, k)
+                self.assertEqual(st["compose_count"], graphs.required_composes(c, k))
+                self.assertEqual(b["max_composes"], st["compose_count"])
+
+
 class TestDigestTruncationFlag(unittest.TestCase):
     """SM の digest 経路でも、元ページの切断がフラグとして残る"""
 
