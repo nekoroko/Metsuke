@@ -5,6 +5,7 @@ from config import get_llm, extract_text_content, invoke_with_retry
 from datetime import datetime
 from numeric import (
     extract_numbers, find_conversion_pairs, conversion_plausible, matches_any,
+    format_findings,
 )
 
 
@@ -51,6 +52,12 @@ FACT_CHECKER_PROMPT = (
     "   - 「下落」の情報と「急騰」の情報が両方ある → 新しい方を優先する\n"
     "   実行履歴の検索結果に含まれる日付を比較し、最終回答が最も新しい情報を反映していない場合は、\n"
     "   NEEDS_REVISIONとして「どちらの情報が新しいか」を明示した上で修正を指示してください。\n"
+    "7. **結論の向きを変える数値の欠落（重要）**: 実行履歴や下の数値一覧に、下落率・減益・\n"
+    "   赤字・遅延など、最終回答の結論と逆向きの数値や事実が含まれていないか確認してください。\n"
+    "   含まれているのに最終回答が触れていない場合は、必ず NEEDS_REVISION とし、\n"
+    "   どの数値を反映すべきかを明示してください。\n"
+    "8. **予定日の注記**: 「◯日に発表」等の予定が履歴にあり、その日が現在の日付以前\n"
+    "   または数日以内であるのに、予想値が確定値のように書かれていないか確認してください。\n"
     "\n"
     "## 回答形式\n"
     "VERDICT: OK または NEEDS_REVISION\n"
@@ -189,19 +196,28 @@ def _build_history_summary(history: list, max_entries: int = 8, max_chars: int =
 
 # ===== 各レビュアー実装 =====
 
-def fact_checker(task: str, output: str, history: list = None) -> dict:
-    """事実検証専門のレビュアー"""
+def fact_checker(task: str, output: str, history: list = None,
+                 findings: list = None) -> dict:
+    """
+    事実検証専門のレビュアー。
+
+    履歴は文字数で切り詰められるため、古いステップの数値は視野から外れる。
+    数値台帳（findings）は切り詰められないので、こちらも併せて渡すことで
+    「履歴にあったのに回答から欠落した数値」を検出できるようにする。
+    """
     llm = get_llm(temperature=0.1)
     today = datetime.now().strftime("%Y年%m月%d日")
     # 時系列比較のため、他レビュアーより多めの文字数・件数で履歴を渡す
     history_summary = _build_history_summary(history or [], max_entries=10, max_chars=600)
+    ledger = format_findings(findings or [])
 
     messages = [
         {"role": "system", "content": FACT_CHECKER_PROMPT},
         {"role": "user", "content": (
             f"## 現在の日付\n{today}\n\n"
             f"## タスク\n{task}\n\n"
-            f"## エージェントの実行履歴（抜粋）\n{history_summary}\n\n"
+            + (f"## 調査中に取得した数値・日付（原文のまま）\n{ledger}\n\n" if ledger else "")
+            + f"## エージェントの実行履歴（抜粋）\n{history_summary}\n\n"
             f"## エージェントの最終回答\n{output[:1500]}\n\n"
             f"上記をチェックしてください。"
         )},
@@ -425,7 +441,14 @@ def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
             continue
         try:
             # 関数によって必要な引数が違うので、kwargsから取り出す
-            if name in ("fact_checker", "data_analyst", "generic_reviewer"):
+            if name == "fact_checker":
+                result = fn(
+                    task=kwargs.get("task", ""),
+                    output=kwargs.get("output", ""),
+                    history=kwargs.get("history", []),
+                    findings=kwargs.get("findings", []),
+                )
+            elif name in ("data_analyst", "generic_reviewer"):
                 result = fn(
                     task=kwargs.get("task", ""),
                     output=kwargs.get("output", ""),

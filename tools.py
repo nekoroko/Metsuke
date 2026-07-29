@@ -330,7 +330,9 @@ TOOL_REGISTRY = {
     "run_shell": {"fn": run_shell, "permission": "execute", "verifiable": False},
     "fetch_url": {"fn": fetch_url, "permission": "read", "verifiable": False},
     "web_search": {"fn": web_search, "permission": "read", "verifiable": True},
-    "suggest_keywords": {"fn": suggest_keywords, "permission": "read", "verifiable": True},
+    # サジェスト一覧は「クエリの意図に答えているか」という判定になじまない。
+    # 実際に妥当なサジェストへ「不十分」と判定し、劣化したクエリを提案していた。
+    "suggest_keywords": {"fn": suggest_keywords, "permission": "read", "verifiable": False},
     "list_saved_tools": {"fn": list_saved_tools, "permission": "read", "verifiable": False},
     "run_saved_tool": {"fn": run_saved_tool, "permission": "execute", "verifiable": False},
 }
