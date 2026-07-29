@@ -27,6 +27,7 @@ from tools import web_search, fetch_url
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
     format_confirmed, TRUNCATION_MARK,
+    ORIGIN_SOURCE, ORIGIN_INTERNAL, internal_texts,
 )
 from graph import (
     _with_trace, correct_step, critic_step, SECTIONS_ALWAYS, SECTIONS_WRITE,
@@ -322,14 +323,14 @@ def _plan_section(plan_items: list[dict]) -> str:
 
 
 def _recent_feedback(history: list) -> str:
-    """correct / critic が書いた差し戻し内容だけを拾う。"""
-    marks = ("（自動訂正チェック）", "複数のレビュアーから")
+    """correct / critic が書いた差し戻し内容だけを拾う。
+
+    以前は本文の書き出し（「（自動訂正チェック）」等）で見分けていたが、
+    文言を変えた瞬間に静かに拾えなくなる。エントリの出所で選ぶ。
+    """
     picked = []
-    for entry in reversed(history or []):
-        if entry.get("role") != "result":
-            continue
-        content = entry.get("content", "")
-        if content.startswith(marks):
+    for content in reversed(internal_texts(history)):
+        if content:
             picked.append(content[:900])
         if len(picked) >= 2:
             break
@@ -449,7 +450,8 @@ def search_step(state: AgentState) -> AgentState:
         queries_done.append(query)
         ran += 1
 
-        history.append({"role": "result", "content": f"[検索] {query}\n{result}"})
+        history.append({"role": "result", "origin": ORIGIN_SOURCE,
+                        "content": f"[検索] {query}\n{result}"})
         findings = merge_findings(
             findings,
             collect_from_text(result, source=f"web_search({query})",
@@ -503,7 +505,7 @@ def digest_step(state: AgentState) -> AgentState:
         except Exception as e:
             body = f"エラー: {e}"
         if body.startswith("エラー") or body.startswith("本文を抽出できません"):
-            history.append({"role": "result",
+            history.append({"role": "result", "origin": ORIGIN_SOURCE,
                             "content": f"[本文取得] {hit['url']}\n{body[:200]}"})
             continue
 
@@ -522,7 +524,7 @@ def digest_step(state: AgentState) -> AgentState:
         fetched.add(hit["url"])
         ok += 1
 
-        history.append({"role": "result",
+        history.append({"role": "result", "origin": ORIGIN_SOURCE,
                         "content": f"[本文取得] {hit['url']}\n{excerpt[:600]}"})
         findings = merge_findings(
             findings,
@@ -716,7 +718,7 @@ def compose_step(state: AgentState) -> AgentState:
         return _with_trace(state, {
             **state,
             "history": state["history"] + [{
-                "role": "result",
+                "role": "result", "origin": ORIGIN_INTERNAL,
                 "content": "レポートの生成が空応答でした。もう一度書いてください。",
             }],
             "status": "running",

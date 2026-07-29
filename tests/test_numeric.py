@@ -1641,3 +1641,233 @@ class TestHeadlineValueType(unittest.TestCase):
                 for x in self.numeric.extract_numbers(line):
                     found.add((i, x["raw"]))
             self.assertEqual(found, listed, f"{case_id} の期待値が実物と食い違う")
+
+
+def _module_path(name):
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), name)
+
+
+def _result_entry_literals(path):
+    """
+    ソースを構文木で読み、role="result" の辞書リテラルを全部返す。
+
+    正規表現で「"role": "result"」の周辺を見る手もあるが、隣の
+    エントリの origin を誤って拾う。辞書ごとに見る。
+    """
+    import ast
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {}
+        for k, v in zip(node.keys, node.values):
+            if isinstance(k, ast.Constant):
+                keys[k.value] = v
+        if keys.get("role") is None:
+            continue
+        role = keys["role"]
+        if isinstance(role, ast.Constant) and role.value == "result":
+            out.append((node.lineno, keys))
+    return out
+
+
+class TestHistoryOriginCoverage(unittest.TestCase):
+    """
+    履歴に role="result" を積む箇所が、全部 origin を書いているか（報告H）。
+
+    出所の既定値は source（fail-open）にしてある。付け忘れても実在の数値が
+    却下される事故にはならない代わり、付け忘れた箇所は黙って従来の挙動、
+    つまり差し戻し文が出典に化けたままになる。静かに残るので、
+    ここで構造として落とす。
+
+    新しく role="result" を積む箇所を足すと、このテストが失敗する。
+    """
+
+    MODULES = ("graph.py", "graph_research.py")
+
+    def test_全ての追加箇所がoriginを持つ(self):
+        import ast
+        import numeric
+        allowed = {numeric.ORIGIN_SOURCE, numeric.ORIGIN_COMPUTED, numeric.ORIGIN_INTERNAL}
+        missing = []
+        for mod in self.MODULES:
+            for lineno, keys in _result_entry_literals(_module_path(mod)):
+                origin = keys.get("origin")
+                if origin is None:
+                    missing.append(f"{mod}:{lineno} に origin がない")
+                    continue
+                # 値は定数（Nameで間接参照していても定数に解決できること）
+                if isinstance(origin, ast.Name):
+                    value = getattr(numeric, origin.id, None)
+                elif isinstance(origin, ast.Constant):
+                    value = origin.value
+                else:
+                    value = None
+                if value not in allowed:
+                    missing.append(f"{mod}:{lineno} の origin が不明な値: {value!r}")
+        self.assertEqual(missing, [], "\n".join([""] + missing))
+
+    def test_洗い出した箇所数が変わっていない(self):
+        # 内訳が変わったら、分類をやり直す必要がある
+        counts = {mod: len(_result_entry_literals(_module_path(mod)))
+                  for mod in self.MODULES}
+        self.assertEqual(counts, {"graph.py": 13, "graph_research.py": 4})
+
+    def test_検知テスト自体が機能する(self):
+        # origin の無いエントリを混ぜたソースを作り、上のチェックが
+        # 実際に拾うことを確かめる。番人が動くことを番人自身で見る。
+        import ast
+        import tempfile
+        src = 'x = {"role": "result", "content": "しるしの無いエントリ"}\n'
+        with tempfile.NamedTemporaryFile("w", suffix=".py", encoding="utf-8",
+                                         delete=False) as f:
+            f.write(src)
+            path = f.name
+        try:
+            found = _result_entry_literals(path)
+            self.assertEqual(len(found), 1)
+            self.assertIsNone(found[0][1].get("origin"))
+        finally:
+            os.unlink(path)
+
+
+class TestOriginFiltering(unittest.TestCase):
+    """
+    差し戻し文が出典として数え直されない（報告H の本体）。
+
+    correct は自分の指摘文を role="result" で履歴に積む。指摘文には
+    却下した数値がそのまま引用されているので、出所を見ないと
+    「1回却下した値が2回目には出典にある」ことになる。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+
+    def _history(self, source_text, feedback):
+        n = self.numeric
+        return [
+            {"role": "result", "origin": n.ORIGIN_SOURCE, "content": source_text},
+            {"role": "assistant", "content": "DONE: 売上高は777.77兆ウォン [実績] でした。"},
+            {"role": "result", "origin": n.ORIGIN_INTERNAL, "content": feedback},
+        ]
+
+    def test_却下した数値は書き直しても却下される(self):
+        _, src = _raw_fixture("doc25_biggo_article")
+        feedback = ("（自動訂正チェック）「777.77兆ウォン」は検索結果・出典のどこにも"
+                    "見当たりません。訂正した上で、再度DONEで最終回答を出してください。")
+        hist = self._history(src, feedback)
+        r = self.checker(output="売上高は777.77兆ウォン [実績] でした。", history=hist)
+        self.assertIn("見当たりません", " ".join(r["issues"]))
+
+    def test_許容幅の中でずらしても通らない(self):
+        # 901.99 を却下したあとの 902.99（差0.11%）は MATCH_TOLERANCE の中に入る。
+        # 指摘文を出典に数えていると、値を少し動かすだけで素通りしていた。
+        _, src = _raw_fixture("doc25_biggo_article")
+        feedback = "（自動訂正チェック）「901.99兆ウォン」は検索結果・出典のどこにも見当たりません。"
+        hist = self._history(src, feedback)
+        r = self.checker(output="売上高は902.99兆ウォン [実績] でした。", history=hist)
+        self.assertIn("見当たりません", " ".join(r["issues"]))
+
+    def test_印の無い履歴は従来どおり出典として扱う(self):
+        # fail-open。付け忘れがあっても、実在の数値を却下する側には倒れない
+        _, src = _raw_fixture("doc25_biggo_article")
+        hist = [{"role": "result", "content": src}]
+        r = self.checker(output="売上高は52兆5,763億ウォン [実績] でした。", history=hist)
+        self.assertNotIn("見当たりません", " ".join(r["issues"]))
+
+    def test_サンドボックスの出力は照合に使える(self):
+        # computed は source と分けてあるが、当面は照合の母集団に入れる。
+        # 計算した値を「出典に無い」と却下すると、報告A と同じ事故になる
+        hist = [{"role": "result", "origin": self.numeric.ORIGIN_COMPUTED,
+                 "content": "前年比: 650%"}]
+        r = self.checker(output="成長率は650% [実績] でした。", history=hist)
+        self.assertNotIn("見当たりません", " ".join(r["issues"]))
+
+    def test_置換候補に却下済みの値を出さない(self):
+        # _history_numbers は候補の母集団でもある。絞らないと、correct が
+        # 却下したばかりの値を候補として提案し返す
+        import reviewers
+        feedback = "（自動訂正チェック）「777.77兆ウォン」は見当たりません。"
+        hist = [{"role": "result", "origin": self.numeric.ORIGIN_INTERNAL,
+                 "content": feedback}]
+        self.assertEqual(reviewers._history_numbers(hist), [])
+
+
+class TestOriginRegressionOnRealData(unittest.TestCase):
+    """
+    実データで、本物の数値が却下されないことを固定する（報告H の副作用対策）。
+
+    報告A で起きたのは「正しい株価9件を出典に無いと却下した」事故だった。
+    照合を厳しくする変更は、同じ形の事故を作りやすい。特に
+    digest / summarize_hits が積む要約は role="result" なので、
+    出所の分類を誤ると実在の数値が落ちる。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        n = numeric
+        _, article = _raw_fixture("doc25_biggo_article")
+        _, series = _raw_fixture("doc28_yahoo_timeseries")
+        _, heads = _raw_fixture("doc28_headlines_actual")
+        # ReAct が実際に積む並びをそのまま作る（graph.py の該当行と同じ出所）
+        self.history = [
+            {"role": "result", "origin": n.ORIGIN_SOURCE, "content": article},
+            {"role": "result", "origin": n.ORIGIN_SOURCE,          # summarize_hits
+             "content": "検索結果の要点: 第1四半期の営業利益は37兆6,103億ウォン。"},
+            {"role": "result", "origin": n.ORIGIN_SOURCE,          # 自動取得した本文
+             "content": f"[本文取得] https://y.example/\n{series}"},
+            {"role": "result", "origin": n.ORIGIN_SOURCE,
+             "content": f"[本文取得] https://n.example/\n{heads}"},
+            {"role": "result", "origin": n.ORIGIN_INTERNAL,        # nudge
+             "content": "（自動チェック）7月28日に決算発表の予定がありますが、まだ結果を調べていません。"},
+            {"role": "result", "origin": n.ORIGIN_INTERNAL,        # correct の差し戻し
+             "content": "（自動訂正チェック）「777.77兆ウォン」は見当たりません。"
+                        "【置換候補】52兆5,763億ウォン。"},
+            {"role": "result", "origin": n.ORIGIN_INTERNAL,        # critic の差し戻し
+             "content": "## 指摘\n- 999.99ドルの根拠が不明です\n"},
+        ]
+
+    def _rejected(self, value):
+        r = self.checker(output=f"{value} [実績] でした。", history=self.history)
+        return any("見当たりません" in i for i in r["issues"])
+
+    def test_本物の数値は通る(self):
+        cases = [
+            ("52兆5,763億ウォン", "検索結果の本文"),
+            ("37兆6,103億ウォン", "summarize_hits の要約"),
+            ("1,484.7ウォン", "検索結果の本文"),
+            ("６０兆５０００億ウォン", "自動取得した見出し"),
+            ("７９兆３０００億ウォン", "自動取得した見出し"),
+            ("130.17ドル", "時系列表（OHLC経路）"),
+            ("154.57ドル", "時系列表（OHLC経路）"),
+        ]
+        for value, where in cases:
+            with self.subTest(value=value):
+                self.assertFalse(self._rejected(value),
+                                 f"{where} 由来の {value} を却下した")
+
+    def test_捏造値は却下される(self):
+        # どちらも差し戻し文の中にしか出てこない値
+        for value in ("777.77兆ウォン", "999.99ドル"):
+            with self.subTest(value=value):
+                self.assertTrue(self._rejected(value), f"{value} が通ってしまう")
+
+    def test_台帳は内部メッセージから作られない(self):
+        # confirmed が減らない根拠。台帳への書き込みは出典由来だけ
+        import inspect
+        import graph
+        import graph_research
+        for mod in (graph, graph_research):
+            src = inspect.getsource(mod)
+            self.assertNotIn("collect_from_text(feedback", src)
+            self.assertNotIn("collect_from_text(nudge", src)

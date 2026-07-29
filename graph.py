@@ -13,6 +13,7 @@ from numeric import (
     claims_absence, unused_numbers, extract_numbers, mechanical_fixes, TRUNCATION_MARK,
     confirmed_from, merge_confirmed, missing_confirmed, format_confirmed,
     append_missing_confirmed,
+    ORIGIN_SOURCE, ORIGIN_COMPUTED, ORIGIN_INTERNAL,
 )
 from datetime import datetime
 
@@ -512,7 +513,7 @@ def react_step(state: AgentState) -> AgentState:
     # 空応答ガード
     if not llm_output or not llm_output.strip():
         new_history = state["history"] + [{
-            "role": "result",
+            "role": "result", "origin": ORIGIN_INTERNAL,
             "content": "LLMが空応答を返しました。THOUGHT/ACTION/DONE形式で再度回答してください。"
         }]
         return _with_trace(state, {
@@ -533,7 +534,8 @@ def react_step(state: AgentState) -> AgentState:
     # 飛ばしたときに起きる（1タスクにつき1回だけ）。
     nudge = _pending_result_nudge(state)
     if nudge and action["type"] != "tool":
-        new_history.append({"role": "result", "content": nudge})
+        new_history.append({"role": "result", "origin": ORIGIN_INTERNAL,
+                                "content": nudge})
         return _with_trace(state, {
             **state,
             "history": new_history,
@@ -570,7 +572,7 @@ def react_step(state: AgentState) -> AgentState:
             hint = ("次はこれらの語を含む別のクエリを試してください: "
                     + "、".join(angles[:3])) if angles else \
                    "別の観点（英語クエリ、別の情報源）に切り替えてください。"
-            new_history.append({"role": "result", "content": (
+            new_history.append({"role": "result", "origin": ORIGIN_INTERNAL, "content": (
                 f"（自動チェック）クエリ「{action['arg']}」は実行済みです。"
                 f"同じ結果しか返りません。{hint}\n"
                 f"実行済みクエリ: {'、'.join(queries_done[-6:])}"
@@ -595,7 +597,9 @@ def react_step(state: AgentState) -> AgentState:
                 result = f"エラー: {e}"
         else:
             result = f"ツール '{tool_name}' は存在しません。generate_codeでPythonコードを生成してください。"
-        new_history.append({"role": "result", "content": result})
+        # ツールの生出力。存在しないツール名を叩いた場合の案内文も同じ枠で返るが、
+        # 数値を含まないので出典側に置いてよい（分類は「どのノードが積んだか」で揃える）
+        new_history.append({"role": "result", "origin": ORIGIN_SOURCE, "content": result})
         verifiable = is_tool_verifiable(tool_name)
         if tool_name == "web_search":
             queries_done.append(action["arg"])
@@ -615,7 +619,8 @@ def react_step(state: AgentState) -> AgentState:
         if tool_name == "web_search":
             summary = summarize_hits(result, collected)
             if summary:
-                new_history.append({"role": "result", "content": summary})
+                new_history.append({"role": "result", "origin": ORIGIN_SOURCE,
+                                    "content": summary})
             blocks, fetched_urls = auto_fetch_sources(result, state)
             for b in blocks:
                 if not b.get("text"):
@@ -630,7 +635,7 @@ def react_step(state: AgentState) -> AgentState:
                 })
                 if b.get("source_truncated"):
                     extra_notes.append(f"{b['url']} は元ページが途中で切れている")
-                new_history.append({"role": "result", "content": (
+                new_history.append({"role": "result", "origin": ORIGIN_SOURCE, "content": (
                     f"[本文取得] {b['url']}\n{excerpt}"
                 )})
                 new_findings = merge_findings(
@@ -666,7 +671,8 @@ def react_step(state: AgentState) -> AgentState:
     elif action["type"] == "code":
         code = action["content"]
         if not code:
-            new_history.append({"role": "result", "content": "コードが空です。Pythonコードブロックを含めてください。"})
+            new_history.append({"role": "result", "origin": ORIGIN_INTERNAL,
+                                "content": "コードが空です。Pythonコードブロックを含めてください。"})
             return _with_trace(state, {
                 **state,
                 "history": new_history,
@@ -681,7 +687,11 @@ def react_step(state: AgentState) -> AgentState:
             output = result["stdout"] if result["stdout"] else "(出力なし)"
         else:
             output = f"エラー:\n{result['stderr']}"
-        new_history.append({"role": "result", "content": output})
+        # サンドボックスの出力。外から取ってきたものではないので source とは分けるが、
+        # 計算で出した値を「出典に無い」と却下すると正しい数値を落とすため、
+        # 当面は照合の母集団に入れる（SOURCE_ORIGINS）
+        new_history.append({"role": "result", "origin": ORIGIN_COMPUTED,
+                            "content": output})
         return _with_trace(state, {
             **state,
             "history": new_history,
@@ -695,7 +705,7 @@ def react_step(state: AgentState) -> AgentState:
             note="成功" if result["success"] else "エラー")
 
     else:
-        new_history.append({"role": "result", "content": (
+        new_history.append({"role": "result", "origin": ORIGIN_INTERNAL, "content": (
             "回答形式を認識できませんでした。\n"
             "最終回答を書く場合は、行の先頭を DONE から始め、コロンに続けて"
             "本文を書いてください。\n"
@@ -817,7 +827,8 @@ def verify_tool_step(state: AgentState) -> AgentState:
         )
         if suggested_query:
             feedback += f" 次はこのようなクエリを試すことを検討してください: 「{suggested_query}」"
-        new_history.append({"role": "result", "content": feedback})
+        new_history.append({"role": "result", "origin": ORIGIN_INTERNAL,
+                            "content": feedback})
 
     return _with_trace(state, {
         **state,
@@ -905,7 +916,7 @@ def correct_step(state: AgentState) -> AgentState:
         out = {
             **state,
             "history": state["history"] + [{
-                "role": "result",
+                "role": "result", "origin": ORIGIN_INTERNAL,
                 "content": f"（自動訂正チェック）実行に失敗したため数値の照合は未実施です: {e}",
             }],
             "status": "needs_revision",
@@ -1034,7 +1045,8 @@ def correct_step(state: AgentState) -> AgentState:
 
     return _with_trace(state, {
         **state,
-        "history": state["history"] + [{"role": "result", "content": feedback}],
+        "history": state["history"] + [{"role": "result", "origin": ORIGIN_INTERNAL,
+                                        "content": feedback}],
         "confirmed": confirmed,
         "status": "running",
         "correction_count": state.get("correction_count", 0) + 1,
@@ -1116,7 +1128,7 @@ def critic_step(state: AgentState) -> AgentState:
         feedback_content += f"\n## 指示\n{aggregated['instruction']}\n"
 
     new_history = state["history"] + [{
-        "role": "result",
+        "role": "result", "origin": ORIGIN_INTERNAL,
         "content": feedback_content,
     }]
 

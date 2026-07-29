@@ -1001,6 +1001,84 @@ UNVERIFIED_MARK = "（出典未確認）"
 TRUNCATION_MARK = "…（本文はここで切れています）"
 
 
+# ===== 履歴エントリの出所 =====
+#
+# 履歴の role="result" は、もともと2種類のものが同じ名前で混ざっていた。
+#   1. エージェントが外から取ってきたもの（検索結果・取得した本文）
+#   2. 機械が内部で書いたもの（correct / critic の差し戻し文、各種ガード）
+#
+# 照合側はこれを一律に「出典」として扱っていたため、correct が却下した
+# 捏造値が、その指摘文ごと出典に化けて次のラウンドで通っていた。
+# 1回却下した値が2回目に素通りするので、訂正の往復が実質1回で頭打ちになる。
+#
+# 文言（「（自動訂正チェック）」で始まるか等）で見分ける手もあるが、
+# 文言を変えた瞬間に静かに壊れる。積む側に出所を書かせる。
+ORIGIN_SOURCE = "source"        # 検索結果・取得した本文
+ORIGIN_COMPUTED = "computed"    # サンドボックスで実行したコードの出力
+ORIGIN_INTERNAL = "internal"    # 機械が書いたメッセージ
+
+# 照合の母集団に入れてよい出所。
+#
+# computed を入れているのは、計算で出した値を「出典に無い」と却下すると
+# 正しい数値を落とす事故（報告A と同じ形）になるため。外から取ってきた
+# ものではないので名前は分けてあり、締めたくなったらこの集合から外すだけでよい。
+SOURCE_ORIGINS = (ORIGIN_SOURCE, ORIGIN_COMPUTED)
+
+# 印の無いエントリの扱い。source に倒す（fail-open）。
+#
+# internal に倒すと、付け忘れが1箇所でもあった時点で実在する数値が
+# 「出典に無い」と却下される。静かに起きるうえ、報告A と同じ壊れ方になる。
+# source に倒せば、付け忘れた箇所は従来どおりに動くだけで、新しい事故は出ない。
+# 付け忘れ自体は tests 側の構造チェックで落とす。
+DEFAULT_ORIGIN = ORIGIN_SOURCE
+
+# origin を付ける前の履歴で、機械が書いたメッセージを見分けるための書き出し。
+# 新しい履歴では使わない（文言を変えると静かに壊れるため）。
+LEGACY_INTERNAL_MARKS = ("（自動訂正チェック）", "複数のレビュアーから", "（自動チェック）",
+                         "（自動品質チェック）")
+
+
+def entry_origin(entry: dict) -> str:
+    return (entry or {}).get("origin") or DEFAULT_ORIGIN
+
+
+def is_source_entry(entry: dict) -> bool:
+    """照合の母集団に入れてよい履歴エントリか。"""
+    if (entry or {}).get("role") != "result":
+        return False
+    return entry_origin(entry) in SOURCE_ORIGINS
+
+
+def source_texts(history: list) -> list[str]:
+    """履歴のうち、出典として扱ってよい本文だけを並びで返す。
+
+    連結せずリストで返すのは、連結すると別々のページの末尾と先頭が
+    たまたま隣り合って「ラベルが近い」と誤判定するため。
+    """
+    return [e.get("content", "") for e in (history or []) if is_source_entry(e)]
+
+
+def has_origin_marks(history: list) -> bool:
+    """この履歴が origin を持つ世代のものか。"""
+    return any(e.get("origin") for e in (history or []))
+
+
+def internal_texts(history: list) -> list[str]:
+    """機械が書いたメッセージだけを並びで返す（差し戻し文の拾い直し用）。
+
+    出所の既定値を source に倒してある（DEFAULT_ORIGIN）ため、この向きの
+    絞り込みでは印の無いエントリが1件も引っかからない。印を付ける前の
+    履歴を読むと差し戻し文が消えるので、その世代だけ従来の文言判定に落とす。
+    印が1つでもあれば origin だけを信じる（混在した履歴で二重に拾わない）。
+    """
+    if not has_origin_marks(history):
+        return [e.get("content", "") for e in (history or [])
+                if e.get("role") == "result"
+                and (e.get("content", "") or "").startswith(LEGACY_INTERNAL_MARKS)]
+    return [e.get("content", "") for e in (history or [])
+            if e.get("role") == "result" and entry_origin(e) == ORIGIN_INTERNAL]
+
+
 def mechanical_fixes(answer: str, findings: list, history: list = None) -> tuple:
     """
     差し戻す予算が無いときに、機械だけで確実に直せる分を適用する。
@@ -1024,10 +1102,11 @@ def mechanical_fixes(answer: str, findings: list, history: list = None) -> tuple
                 f"（出典の文脈に基づく）"
             )
 
+    # 「（出典未確認）」を付けるかどうかの判定。ここも出典由来だけを見る。
+    # 差し戻し文を混ぜると、却下したばかりの値に印が付かなくなる。
     known = []
-    for e in (history or []):
-        if e.get("role") == "result":
-            known.extend(extract_numbers(e.get("content", "")))
+    for src in source_texts(history):
+        known.extend(extract_numbers(src))
     for f in findings or []:
         if f.get("kind") == "number":
             known.extend(extract_numbers(f.get("raw", "")))

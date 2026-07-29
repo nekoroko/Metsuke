@@ -9,7 +9,7 @@ from numeric import (
     dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
     label_value_mismatches, candidates_for, tag_conflicts,
     appears_verbatim, labeled_values, primary_label, TRUNCATION_MARK,
-    candidate_suggestion, ohlc_values, matches_bare,
+    candidate_suggestion, ohlc_values, matches_bare, source_texts,
 )
 
 
@@ -353,8 +353,11 @@ def _history_numbers(history: list, sources: list = None) -> list[dict]:
     """
     照合の母集団を作る。検索結果（role=result）と、出典本文から抽出した
     facts の両方を対象にする。
+
+    ここは置換候補の母集団でもある。内部メッセージを混ぜると、correct が
+    却下したばかりの値を「候補」として提案し返すことになる。
     """
-    texts = [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+    texts = source_texts(history)
     numbers = []
     for t in texts:
         numbers.extend(extract_numbers(t))
@@ -365,8 +368,11 @@ def _history_numbers(history: list, sources: list = None) -> list[dict]:
 
 
 def _forecast_in_context(history: list, findings: list) -> bool:
-    """取得済みの情報に、予想値であることを示す語が含まれているか。"""
-    texts = [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+    """取得済みの情報に、予想値であることを示す語が含まれているか。
+
+    差し戻し文にも「予想」の語は普通に出るので、出典だけを見る。
+    """
+    texts = source_texts(history)
     texts += [f.get("context", "") for f in (findings or [])]
     return any(w in t for t in texts for w in FORECAST_WORDS)
 
@@ -416,26 +422,30 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
             )
 
     # 連結せずテキストの並びとして持つ。連結すると、別々のページの末尾と
-    # 先頭がたまたま隣り合って「ラベルが近い」と誤判定する
-    source_texts = (
-        [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+    # 先頭がたまたま隣り合って「ラベルが近い」と誤判定する。
+    #
+    # 履歴からは出典由来のものだけを採る。correct / critic の差し戻し文には
+    # 却下した数値がそのまま引用されているので、混ぜるとその値が
+    # 「出典にある」ことになり、次のラウンドで素通りする。
+    src_texts = (
+        source_texts(history)
         + [f.get("context", "") for f in (findings or [])]
         + [s.get("excerpt", "") for s in (sources or [])]
     )
     # 元ページが取得上限で切れていたか。抜粋に印は残らないので、
     # 構造化フィールドを正とし、印は後方互換のために併せて見る
     truncated = (any(s.get("source_truncated") for s in (sources or []))
-                 or any(TRUNCATION_MARK in t for t in source_texts))
+                 or any(TRUNCATION_MARK in t for t in src_texts))
 
     candidates = _history_numbers(history, sources)
     # 時系列表から読み取れた価格。単位が無いので「存在するか」の判定にだけ使う
-    bare = ohlc_values(source_texts)
+    bare = ohlc_values(src_texts)
     answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(output or "")}
     for n in extract_numbers(output or ""):
         # 抽出は完璧ではない。原文にその表記がそのまま出ているなら、
         # 「出典に無い」と断じない（実測で、原文にある売上高が却下された）
         if (not matches_any(n, candidates)
-                and not appears_verbatim(n["raw"], source_texts)
+                and not appears_verbatim(n["raw"], src_texts)
                 and not matches_bare(n, bare)):
             label = answer_labels.get(n["raw"], "")
             kind, hints = candidate_suggestion(n, findings or [], label=label)
@@ -460,7 +470,7 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
                 f"{suggestion}{trunc_note}（該当箇所: …{n['context']}…）。"
             )
 
-    for m in label_value_mismatches(output or "", findings or [], source_texts):
+    for m in label_value_mismatches(output or "", findings or [], src_texts):
         if m["reason"] == "value":
             issues.append(
                 f"「{m['label']}」の値が出典と違います。回答は「{m['raw']}」ですが、"
