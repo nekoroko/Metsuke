@@ -15,3 +15,32 @@ class AgentState(TypedDict):
     last_tool_name: str       # 直前に呼んだツール名（action_type=="tool"の場合のみ）
     tool_verify_count: int    # verify_toolノードを通った回数（step_countとは別管理）
     max_tool_verifies: int    # verify_toolノードの最大実行回数
+
+
+def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
+                       max_tool_verifies: int = 6) -> AgentState:
+    """
+    エージェントの初期状態を生成する。
+
+    AgentStateにキーを追加した際、初期化箇所（run.py / executor.pyの3箇所）の
+    どれかが取り残されると、そのキーを直接添字アクセスするノードに到達した
+    時点でKeyErrorになる。実際、run.py が critique_count 等を持たないまま
+    残っており、DONE後に critic_step の state["critique_count"] で落ちていた。
+
+    初期状態の生成をここへ集約し、追加漏れが構造的に起きないようにする。
+    """
+    return {
+        "task": task,
+        "history": [],
+        "generated_code": "",
+        "status": "running",
+        "step_count": 0,
+        "max_steps": max_steps,
+        "critique_count": 0,
+        "max_critiques": max_critiques,
+        "reasoning_detected": False,
+        "last_action_type": "",
+        "last_tool_name": "",
+        "tool_verify_count": 0,
+        "max_tool_verifies": max_tool_verifies,
+    }

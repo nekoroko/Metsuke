@@ -1,0 +1,20 @@
+# requirements-tools.txt — 「ツール実行時ランタイム」のライブラリ集合
+#
+# AIが生成するツールコード（Type1）が使ってよいライブラリの唯一の定義。
+# ai_creator.py の CREATOR_PROMPT がAIに提示している一覧と対応させること。
+#
+# この集合は以下の2箇所で同一に保つ必要がある:
+#   - Containerfile        … サンドボックス（プレビュー実行）用イメージ
+#   - ホストのvenv         … 検証済みツールの直接実行（executor.run_tool）
+#
+# requirements.txt から -r で読み込まれるため、ホスト側は
+# `pip install -r requirements.txt` だけで両方揃う。
+#
+# 定義が分かれていると「プレビューは通ったのにホストで落ちる」
+# （またはその逆）が構造的に発生するため、必ずここに集約する。
+
+ddgs
+requests
+beautifulsoup4
+pandas
+numpy

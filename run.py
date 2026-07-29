@@ -1,17 +1,13 @@
 # run.py — エージェント実行スクリプト（ReActループ版）
 import os
 from graph import app
+from state import make_initial_state
 
 os.makedirs("/tmp/agent_workspace", exist_ok=True)
 
-initial_state = {
-    "task": "1から100までの合計を計算して結果を表示してください。",
-    "history": [],
-    "generated_code": "",
-    "status": "running",
-    "step_count": 0,
-    "max_steps": 10,
-}
+initial_state = make_initial_state(
+    "1から100までの合計を計算して結果を表示してください。"
+)
 
 print("=== エージェント実行開始 ===\n")
 

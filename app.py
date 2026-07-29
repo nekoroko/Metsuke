@@ -9,7 +9,9 @@ from db import (
     get_executions, get_execution,
     get_all_settings, set_settings,
 )
-from executor import run_tool, run_agent, run_preview, parse_history_for_display
+from executor import (
+    run_tool, run_agent, run_preview, parse_history_for_display, WORKSPACE,
+)
 from ai_creator import generate_tool, fix_code
 from scheduler import start as start_scheduler, add_job, remove_job, run_agent_now
 from config import get_current_provider_info
@@ -39,10 +41,31 @@ tab_create, tab_library, tab_agent, tab_schedule, tab_history, tab_settings = st
 ])
 
 
-def preview_and_fix(code: str, key_prefix: str, original_prompt: str = ""):
+def preview_options(key_prefix: str):
+    """
+    プレビュー実行時のサンドボックス設定UI。
+    ボタンのコールバック内で描画するとリラン時に消えるため、
+    プレビューボタンより前に描画して値だけを渡す。
+    """
+    col1, col2 = st.columns(2)
+    network = col1.checkbox(
+        "🌐 ネットワークを許可", key=f"pvnet_{key_prefix}",
+        help="Tavily等のAPIアクセスやスクレイピングを行うツールで必要です。"
+             "オフの場合は --network none で通信を遮断します。",
+    )
+    writable = col2.checkbox(
+        "✏️ 書き込みを許可", key=f"pvwr_{key_prefix}",
+        help=f"作業ディレクトリ（{WORKSPACE}）へのファイル書き込みを許可します。"
+             "オフの場合は読み取り専用でマウントします。",
+    )
+    return network, writable
+
+
+def preview_and_fix(code: str, key_prefix: str, original_prompt: str = "",
+                    network: bool = False, writable: bool = False):
     """プレビュー実行 → エラー表示 → AI修正の共通フロー"""
     with st.spinner("Podmanで実行中..."):
-        result = run_preview(code)
+        result = run_preview(code, network=network, writable_workspace=writable)
 
     if result["status"] == "done":
         st.success("✅ 実行成功")
@@ -75,7 +98,9 @@ def preview_and_fix(code: str, key_prefix: str, original_prompt: str = ""):
                     status.update(label="修正完了", state="complete")
 
                     st.markdown("**修正後のコードを自動プレビュー中...**")
-                    retry_result = run_preview(fixed_code)
+                    retry_result = run_preview(
+                        fixed_code, network=network, writable_workspace=writable
+                    )
 
                     if retry_result["status"] == "done":
                         st.success("✅ 修正後の実行に成功しました")
@@ -212,12 +237,15 @@ with tab_create:
             tool_desc = st.text_input("説明", value=gen.get("description", ""))
             tool_code = st.text_area("コード（編集可能）", value=gen["code"], height=400)
 
+            pv_network, pv_writable = preview_options("create")
+
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("🧪 プレビュー実行"):
                     fixed = preview_and_fix(
                         tool_code, "create",
-                        original_prompt=gen.get("original_prompt", "")
+                        original_prompt=gen.get("original_prompt", ""),
+                        network=pv_network, writable=pv_writable,
                     )
                     if fixed != tool_code:
                         st.session_state["generated"]["code"] = fixed
@@ -282,6 +310,8 @@ with tab_library:
 
                 edited_code = st.text_area("コード", value=t["code"], height=300, key=f"tc_{t['id']}")
 
+                pv_network, pv_writable = preview_options(f"lib_{t['id']}")
+
                 col1, col2, col3, col4 = st.columns(4)
                 run_clicked = col1.button("▶ 実行", key=f"tr_{t['id']}")
                 preview_clicked = col2.button("🧪 プレビュー", key=f"tp_{t['id']}")
@@ -317,7 +347,10 @@ with tab_library:
                 if preview_clicked:
                     st.divider()
                     st.markdown("### プレビュー結果")
-                    fixed = preview_and_fix(edited_code, f"lib_{t['id']}")
+                    fixed = preview_and_fix(
+                        edited_code, f"lib_{t['id']}",
+                        network=pv_network, writable=pv_writable,
+                    )
                     if fixed != edited_code:
                         update_tool(t["id"], code=fixed)
                         st.rerun()

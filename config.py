@@ -26,8 +26,7 @@ import sqlite3
 import time
 import random
 from langchain_openai import ChatOpenAI
-
-AGENT_STUDIO_DB = os.path.expanduser("~/agent-studio/agent_studio.db")
+from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
 
 FALLBACK_LOCAL_BASE_URL = "http://10.0.2.2:1234/v1"
 FALLBACK_LOCAL_MODEL = "gemma-4-12b-qat"

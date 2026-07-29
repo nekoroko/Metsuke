@@ -6,9 +6,9 @@ import subprocess
 import tempfile
 import urllib.request
 import urllib.parse
+from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
 
 WORKSPACE = "/tmp/agent_workspace"
-AGENT_STUDIO_DB = os.path.expanduser("~/agent-studio/agent_studio.db")
 
 
 def _read_settings() -> dict:

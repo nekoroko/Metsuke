@@ -2,11 +2,43 @@
 import subprocess
 import tempfile
 import os
-import sys
 from db import add_execution, finish_execution, update_execution_progress
+from sandbox import execute_in_sandbox
+from state import make_initial_state
 
 WORKSPACE = "/tmp/agent_workspace"
-# agent-projectのパスを追加（将来的にはpipパッケージ化）
+
+
+# サンドボックスに渡してよい設定キー → 環境変数名の対応表。
+#
+# 設定DB（agent_studio.db）には検索APIキーだけでなく、LLMプロバイダの
+# APIキー（api_key）も平文で同居している。DBそのものをコンテナに
+# マウントすると、未検証のAI生成コードに全プロバイダのキーを渡すことになる。
+# そのため「必要なキーだけを環境変数で個別に注入する」方式にしている。
+SANDBOX_ENV_KEYS = {
+    "tavily_api_key": "TAVILY_API_KEY",
+    "google_api_key": "GOOGLE_API_KEY",
+    "google_cse_id": "GOOGLE_CSE_ID",
+    "brave_api_key": "BRAVE_API_KEY",
+}
+
+
+def build_sandbox_env() -> dict:
+    """
+    サンドボックスに渡す環境変数を組み立てる。
+    SANDBOX_ENV_KEYS に列挙したキーのうち、値が入っているものだけを返す。
+    LLMのAPIキーは意図的に含めない。
+    """
+    from db import get_all_settings
+
+    settings = get_all_settings()
+    env = {}
+    for setting_key, env_name in SANDBOX_ENV_KEYS.items():
+        value = (settings.get(setting_key) or "").strip()
+        if value:
+            env[env_name] = value
+    return env
+
 
 def run_tool(tool_id: str, tool_name: str, code: str,
              trigger: str = "manual", schedule_id: str = None) -> dict:
@@ -53,21 +85,7 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
         # agent-projectをPythonパスに追加
         from graph import app as react_app
 
-        initial_state = {
-            "task": task_prompt,
-            "history": [],
-            "generated_code": "",
-            "status": "running",
-            "step_count": 0,
-            "max_steps": 10,
-            "critique_count": 0,
-            "max_critiques": 2,
-            "reasoning_detected": False,
-            "last_action_type": "",
-            "last_tool_name": "",
-            "tool_verify_count": 0,
-            "max_tool_verifies": 6,
-        }
+        initial_state = make_initial_state(task_prompt)
 
         final_state = None
         for step in react_app.stream(initial_state):
@@ -158,21 +176,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None):
             if tool_context:
                 task_prompt = task_prompt + "\n" + tool_context
 
-        initial_state = {
-            "task": task_prompt,
-            "history": [],
-            "generated_code": "",
-            "status": "running",
-            "step_count": 0,
-            "max_steps": 10,
-            "critique_count": 0,
-            "max_critiques": 2,
-            "reasoning_detected": False,
-            "last_action_type": "",
-            "last_tool_name": "",
-            "tool_verify_count": 0,
-            "max_tool_verifies": 6,
-        }
+        initial_state = make_initial_state(task_prompt)
 
         final_state = None
         for step in react_app.stream(initial_state):
@@ -250,21 +254,7 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
     try:
         from graph import app as react_app
 
-        initial_state = {
-            "task": task_prompt,
-            "history": [],
-            "generated_code": "",
-            "status": "running",
-            "step_count": 0,
-            "max_steps": 10,
-            "critique_count": 0,
-            "max_critiques": 2,
-            "reasoning_detected": False,
-            "last_action_type": "",
-            "last_tool_name": "",
-            "tool_verify_count": 0,
-            "max_tool_verifies": 6,
-        }
+        initial_state = make_initial_state(task_prompt)
 
         import re as _re
 
@@ -334,36 +324,27 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
         yield {"step": -1, "status": "error", "result": str(e)}
 
 
-def run_preview(code: str) -> dict:
-    """プレビュー実行（Podmanサンドボックス内）"""
-    os.makedirs(WORKSPACE, exist_ok=True)
+def run_preview(code: str, network: bool = False,
+                writable_workspace: bool = False) -> dict:
+    """
+    プレビュー実行（Podmanサンドボックス内）。
 
-    with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.py', delete=False,
-        encoding='utf-8', dir=WORKSPACE
-    ) as f:
-        f.write(code)
-        temp_filename = os.path.basename(f.name)
-        temp_path = f.name
+    起動オプションの構築は sandbox.execute_in_sandbox に一本化している
+    （以前はここに同等のpodmanコマンドが重複定義されており、
+      片方だけ設定が古くなる状態だった）。
 
-    try:
-        result = subprocess.run(
-            [
-                "podman", "run", "--rm",
-                "--network", "none", "--read-only",
-                "--tmpfs", "/tmp:rw,size=64m",
-                "--memory", "256m", "--pids-limit", "32", "--cpus", "1",
-                "-v", f"{WORKSPACE}:{WORKSPACE}:ro",
-                "docker.io/library/python:3.12-slim",
-                "python3", f"{WORKSPACE}/{temp_filename}",
-            ],
-            capture_output=True, text=True, timeout=60,
-        )
-        return {"status": "done" if result.returncode == 0 else "error",
-                "stdout": result.stdout, "stderr": result.stderr}
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "stdout": "", "stderr": "タイムアウト（60秒）"}
-    except FileNotFoundError:
-        return {"status": "error", "stdout": "", "stderr": "podmanが見つかりません"}
-    finally:
-        os.unlink(temp_path)
+    network=True のときだけ、検索APIキーを環境変数として渡す。
+    通信できない状態でキーを渡しても意味がないため。
+    """
+    result = execute_in_sandbox(
+        code,
+        timeout=60,
+        network=network,
+        writable_workspace=writable_workspace,
+        env=build_sandbox_env() if network else None,
+    )
+    return {
+        "status": "done" if result["success"] else "error",
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+    }

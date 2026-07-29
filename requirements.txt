@@ -1,7 +1,11 @@
+# アプリ本体の依存
 langchain
 langchain-openai
 langchain-anthropic
 langgraph
 streamlit
 apscheduler
-ddgs
+
+# ツール実行時ランタイム（AI生成ツールが使うライブラリ）。
+# サンドボックスイメージ（Containerfile）と同じ集合をホストにも入れる。
+-r requirements-tools.txt

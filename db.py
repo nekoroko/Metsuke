@@ -3,8 +3,7 @@ import sqlite3
 import uuid
 import json
 from datetime import datetime
-
-DB_PATH = "agent_studio.db"
+from paths import DB_PATH  # 実行CWDに依存しない絶対パス（paths.py参照）
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
