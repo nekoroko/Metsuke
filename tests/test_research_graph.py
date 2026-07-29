@@ -697,3 +697,33 @@ class TestBudgetInvariantGenerality(unittest.TestCase):
         feedback = out["history"][-1]["content"]
         self.assertGreaterEqual(feedback.count("見当たりません"), 3)   # 指摘は3件
         self.assertEqual(out["compose_count"], 0)                      # 枠の消費は執筆側で1回だけ
+
+
+class TestDigestTruncationFlag(unittest.TestCase):
+    """SM の digest 経路でも、元ページの切断がフラグとして残る"""
+
+    def setUp(self):
+        self._orig = gr.fetch_url
+
+    def tearDown(self):
+        gr.fetch_url = self._orig
+
+    def _searched(self):
+        return _state(plan_items=[{
+            "id": 1, "question": "決算", "query": "決算", "status": "open",
+            "hits": [{"url": "https://example.com/a", "title": "決算"}],
+        }])
+
+    def test_切断された本文はフラグが立つ(self):
+        from numeric import TRUNCATION_MARK
+        body = ("SKハイニックスの営業利益は9.2兆ウォンとなった。\n" * 60) + TRUNCATION_MARK
+        gr.fetch_url = lambda url: body
+        out = gr.digest_step(self._searched())
+        self.assertTrue(out["sources"][0]["source_truncated"])
+        # 抜粋自体には印は残らない（残す設計にしていない）
+        self.assertNotIn(TRUNCATION_MARK, out["sources"][0]["excerpt"])
+
+    def test_切れていない本文はフラグが立たない(self):
+        gr.fetch_url = lambda url: "SKハイニックスの営業利益は9.2兆ウォンとなった。"
+        out = gr.digest_step(self._searched())
+        self.assertFalse(out["sources"][0]["source_truncated"])

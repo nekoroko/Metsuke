@@ -10,7 +10,7 @@ from reviewers import (
 )
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
-    claims_absence, unused_numbers, extract_numbers, mechanical_fixes,
+    claims_absence, unused_numbers, extract_numbers, mechanical_fixes, TRUNCATION_MARK,
     confirmed_from, merge_confirmed, missing_confirmed, format_confirmed,
     append_missing_confirmed,
 )
@@ -398,7 +398,11 @@ def auto_fetch_sources(result: str, state: dict, limit: int = AUTO_FETCH_TOP_N):
         if body.startswith("エラー") or body.startswith("本文を抽出できません"):
             blocks.append({"url": url, "text": "", "error": body[:120]})
         else:
-            blocks.append({"url": url, "text": body})
+            # 「元ページが取得上限で切れていたか」を構造化して持つ。
+            # 本文中の印は、この後の抜粋（body[:1200]）で必ず落ちるため、
+            # テキストに埋めたままでは後段に届かない。
+            blocks.append({"url": url, "text": body,
+                           "source_truncated": TRUNCATION_MARK in body})
         if len([b for b in blocks if b.get("text")]) >= limit:
             break
     return blocks, attempted
@@ -557,6 +561,7 @@ def react_step(state: AgentState) -> AgentState:
         tool_fn = get_tool_fn(tool_name)
         queries_done = list(state.get("queries_done", []))
         fetched_urls = list(state.get("fetched_urls", []))
+        new_sources = list(state.get("sources", []))
         extra_notes = []
 
         # 同じクエリの再実行は結果も同じ。実行せずに別の切り口を促す
@@ -618,6 +623,13 @@ def react_step(state: AgentState) -> AgentState:
                     continue
                 fetched_count += 1
                 excerpt = b["text"][:1200]
+                # 抜粋は構造化して残す。切断の有無は本文ではなくフラグで運ぶ
+                new_sources.append({
+                    "url": b["url"], "excerpt": excerpt,
+                    "source_truncated": bool(b.get("source_truncated")),
+                })
+                if b.get("source_truncated"):
+                    extra_notes.append(f"{b['url']} は元ページが途中で切れている")
                 new_history.append({"role": "result", "content": (
                     f"[本文取得] {b['url']}\n{excerpt}"
                 )})
@@ -640,6 +652,7 @@ def react_step(state: AgentState) -> AgentState:
             **state,
             "history": new_history,
             "findings": new_findings,
+            "sources": new_sources,
             "queries_done": queries_done,
             "fetched_urls": fetched_urls,
             "status": "running",
@@ -898,7 +911,6 @@ def correct_step(state: AgentState) -> AgentState:
             "status": "needs_revision",
             "verification_notes": state.get("verification_notes", [])
             + [f"数値の機械照合を実行できませんでした: {e}"],
-            "correction_count": state.get("correction_count", 0) + 1,
         }
         return _with_trace(state, out, "correct", "照合の実行に失敗", "critic",
                            note=str(e)[:80])
@@ -946,7 +958,6 @@ def correct_step(state: AgentState) -> AgentState:
             **state,
             "confirmed": confirmed,
             "status": "needs_revision",
-            "correction_count": state.get("correction_count", 0) + 1,
         }, "correct", "数値の機械照合: 問題なし", "critic", note=diff_note)
 
     # 差し戻せるかどうかは予算次第。差し戻せない場合でも検証は済んでいるので、
@@ -1000,7 +1011,6 @@ def correct_step(state: AgentState) -> AgentState:
             "confirmed": confirmed,
             "status": "needs_revision",
             "verification_notes": state.get("verification_notes", []) + issues + applied,
-            "correction_count": state.get("correction_count", 0) + 1,
         }, "correct", f"数値の問題を{len(issues)}件検出（差し戻せず）", "critic",
             note=f"訂正の予算切れ。機械的に{len(applied)}件だけ適用し、残りは注記に回す")
 

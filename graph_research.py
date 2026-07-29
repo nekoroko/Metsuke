@@ -26,7 +26,7 @@ from state import AgentState
 from tools import web_search, fetch_url
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
-    format_confirmed,
+    format_confirmed, TRUNCATION_MARK,
 )
 from graph import (
     _with_trace, correct_step, critic_step, SECTIONS_ALWAYS, SECTIONS_WRITE,
@@ -510,11 +510,14 @@ def digest_step(state: AgentState) -> AgentState:
         excerpt = relevant_excerpt(body, _keywords(item["question"] + " " + item["query"]))
         if not excerpt:
             excerpt = body[:EXCERPT_CHARS]
+        # 抜粋は段落を選んで詰めるので、本文末尾の切断の印は必ず落ちる。
+        # 「元ページが切れていたか」はフラグで持つ（抜粋であること自体とは別）
         sources.append({
             "url": hit["url"],
             "title": hit.get("title", ""),
             "item_id": item["id"],
             "excerpt": excerpt,
+            "source_truncated": TRUNCATION_MARK in body,
         })
         fetched.add(hit["url"])
         ok += 1

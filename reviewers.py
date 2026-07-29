@@ -419,7 +419,10 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
         + [f.get("context", "") for f in (findings or [])]
         + [s.get("excerpt", "") for s in (sources or [])]
     )
-    truncated = any(TRUNCATION_MARK in t for t in source_texts)
+    # 元ページが取得上限で切れていたか。抜粋に印は残らないので、
+    # 構造化フィールドを正とし、印は後方互換のために併せて見る
+    truncated = (any(s.get("source_truncated") for s in (sources or []))
+                 or any(TRUNCATION_MARK in t for t in source_texts))
 
     candidates = _history_numbers(history, sources)
     answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(output or "")}

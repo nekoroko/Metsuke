@@ -1266,3 +1266,235 @@ class TestSuggestionFormatting(unittest.TestCase):
         self.assertIn("これは候補ではありません", feedback)
         # 参考リストは候補より後ろに置く
         self.assertLess(feedback.index("【置換候補"), feedback.index("【参考リスト】"))
+
+
+def _raw_fixture(case_id):
+    """実物の生テキストを読む（noisy_sources.json の raw_file を辿る）。"""
+    case = _noisy(case_id)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", case["raw_file"])
+    with open(path, encoding="utf-8") as f:
+        return case, f.read()
+
+
+class TestRealDoc23Moomoo(unittest.TestCase):
+    """doc23 の moomoo 連結データ（実物）"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        self.case, self.raw = _raw_fixture("doc23_moomoo_concat")
+        self.led = numeric.collect_from_text(self.raw, source="fetch_url(moomoo)")
+        self.hist = [{"role": "result", "content": self.raw}]
+
+    def test_実物のデータ行は表と判定される(self):
+        data_line = [l for l in self.raw.splitlines() if len(l) > 100][0]
+        self.assertTrue(self.numeric.looks_tabular(data_line))
+
+    def test_単位のある値だけが台帳に載る(self):
+        # 高値・安値・出来高などは単位が無く、台帳には入らない（設計どおり）
+        raws = [f["raw"] for f in self.led if f["kind"] == "number"]
+        self.assertEqual(sorted(raws), ["0.55%", "6.84%"])
+
+    def test_値の直後にラベルが来る並びである(self):
+        got = {lv["raw"]: (lv["label_before"], lv["label_after"])
+               for lv in self.numeric.labeled_values(self.raw)}
+        self.assertEqual(got["6.84%"], ("配当利回", "振幅"))
+        self.assertEqual(got["0.55%"], ("売買代金", "売買回転率"))
+
+    def test_正しいラベルの記述は通る(self):
+        for label, value in self.case["correct_pairs"]:
+            r = self.checker(output=f"{label}は{value} [実績] です。",
+                             history=self.hist, findings=self.led)
+            self.assertNotIn("ラベルの対応", " ".join(r["issues"]),
+                             f"{label}={value} が誤検出された: {r['issues']}")
+
+    @unittest.expectedFailure
+    def test_値の後ろにラベルが来る表での付け替えを検出する(self):
+        """
+        未対応。doc23 の実物は「値→ラベル」の並びだが、_adjacent_label は
+        前後どちらの一致も受け入れるため、「配当利回6.84%振幅」の 6.84% を
+        「配当利回り」と書いても通ってしまう。表の向きを判定する必要がある。
+        """
+        for label, value in self.case["wrong_pairs"]:
+            r = self.checker(output=f"{label}は{value} [実績] です。",
+                             history=self.hist, findings=self.led)
+            self.assertIn("ラベルの対応", " ".join(r["issues"]),
+                          f"{label}={value} の付け替えを見逃した")
+
+
+class TestRealDoc25Biggo(unittest.TestCase):
+    """doc25 の biggo 記事全文（実物）。「約」が6回出てくる"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        self.case, self.raw = _raw_fixture("doc25_biggo_article")
+        self.led = numeric.collect_from_text(self.raw, source="fetch_url(biggo)")
+        self.hist = [{"role": "result", "content": self.raw}]
+
+    def test_約は複数回登場する(self):
+        self.assertGreaterEqual(self.raw.count("約"), 6)
+
+    def test_約はラベルとして採られない(self):
+        labels = {lv["label_before"] for lv in self.numeric.labeled_values(self.raw)}
+        self.assertNotIn("約", labels)
+        for label in labels:
+            self.assertFalse(label.endswith("約"), f"修飾語がラベルに残っている: {label}")
+
+    def test_出典に書かれている記述は却下されない(self):
+        for statement in self.case["true_statements"]:
+            r = self.checker(output=statement, history=self.hist, findings=self.led)
+            self.assertEqual(r["verdict"], "OK", f"{statement} → {r['issues']}")
+
+    def test_出典に無い数値は却下される(self):
+        r = self.checker(output="営業利益は99兆9,999億ウォン [実績] でした。",
+                         history=self.hist, findings=self.led)
+        self.assertIn("見当たりません", " ".join(r["issues"]))
+
+    def test_換算の併記が矛盾していれば捕まえる(self):
+        # 実物にある「83兆ウォン（約9兆円）」は妥当。桁をずらすと捕まる
+        ok = self.checker(output="売上高は83兆ウォン（約9兆円） [予想] です。",
+                          history=self.hist, findings=self.led)
+        self.assertNotIn("換算が矛盾", " ".join(ok["issues"]))
+        ng = self.checker(output="売上高は83兆ウォン（約83兆円） [予想] です。",
+                          history=self.hist, findings=self.led)
+        self.assertIn("換算が矛盾", " ".join(ng["issues"]))
+
+
+class TestRealDoc27Truncated(unittest.TestCase):
+    """doc27 の切断された fetch 結果（実物）"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        self.case, self.raw = _raw_fixture("doc27_biggo_truncated")
+
+    def test_切れた先の数値は本文に無い(self):
+        self.assertNotIn(self.case["invented_number"], self.raw)
+        self.assertIn(self.case["still_present_number"], self.raw)
+
+    def test_構造化フラグがあれば切断として伝える(self):
+        led = self.numeric.collect_from_text(self.raw, source="fetch_url(biggo)")
+        r = self.checker(
+            output=f"前営業日比{self.case['invented_number']} [実績] 下落しました。",
+            history=[{"role": "result", "content": self.raw}],
+            findings=led,
+            sources=[{"url": "https://finance.biggo.jp/news/2694607f",
+                      "excerpt": self.raw[:700], "source_truncated": True}])
+        joined = " ".join(r["issues"])
+        self.assertIn("見当たりません", joined)
+        self.assertIn("途中で切れて", joined)
+
+    def test_フラグが無ければ切断とは言わない(self):
+        led = self.numeric.collect_from_text(self.raw, source="fetch_url(biggo)")
+        r = self.checker(
+            output=f"前営業日比{self.case['invented_number']} [実績] 下落しました。",
+            history=[{"role": "result", "content": self.raw}],
+            findings=led,
+            sources=[{"url": "x", "excerpt": self.raw[:700], "source_truncated": False}])
+        self.assertNotIn("途中で切れて", " ".join(r["issues"]))
+
+
+class TestTruncationFlagPropagation(unittest.TestCase):
+    """
+    元ページの切断は、テキストではなく構造化フィールドで運ぶ。
+
+    本文中の印は抜粋（ReActは1200字、SMは700字）で必ず落ちるため、
+    テキストに埋めたままでは検証側に届かない。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph, numeric
+        self.graph = graph
+        self.numeric = numeric
+        self.result = ("タイトル: 記事\nURL: https://example.com/a\n概要: 概要文。")
+
+    def _fetch_returning(self, body):
+        import tools
+        orig = tools.fetch_url
+        tools.fetch_url = lambda url: body
+        self.addCleanup(lambda: setattr(tools, "fetch_url", orig))
+
+    def test_修正前の問題_印は抜粋で落ちる(self):
+        body = "あ" * 8000 + self.numeric.TRUNCATION_MARK
+        self.assertNotIn(self.numeric.TRUNCATION_MARK, body[:1200])
+
+    def test_ReAct経路でフラグが立つ(self):
+        self._fetch_returning("あ" * 8000 + self.numeric.TRUNCATION_MARK)
+        blocks, _ = self.graph.auto_fetch_sources(self.result, {"fetched_urls": []})
+        self.assertTrue(blocks[0]["source_truncated"])
+
+    def test_切れていなければフラグは立たない(self):
+        self._fetch_returning("短い本文。営業利益は9.2兆ウォン。")
+        blocks, _ = self.graph.auto_fetch_sources(self.result, {"fetched_urls": []})
+        self.assertFalse(blocks[0]["source_truncated"])
+
+    def test_フラグはsourcesに積まれ検証側まで届く(self):
+        from reviewers import numeric_checker
+        sources = [{"url": "https://example.com/a", "excerpt": "抜粋のみ",
+                    "source_truncated": True}]
+        r = numeric_checker(output="為替は1,380ウォン [実績] でした。",
+                            history=[{"role": "result", "content": "抜粋のみ"}],
+                            sources=sources)
+        self.assertIn("途中で切れて", " ".join(r["issues"]))
+
+
+class TestCorrectionCountSemantics(unittest.TestCase):
+    """correction_count は差し戻した回数だけを数える"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph
+        from state import make_initial_state
+        from numeric import collect_from_text
+        self.graph = graph
+        self.make = make_initial_state
+        self.collect = collect_from_text
+
+    def _state(self, done, **over):
+        s = self.make("決算", **over)
+        s["findings"] = self.collect("売上高は22.3兆ウォン。", source="web_search(x)")
+        s["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォン。"},
+            {"role": "assistant", "content": f"DONE: {done}"},
+        ]
+        s["step_count"] = 3
+        return s
+
+    def test_問題なしの通過は数えない(self):
+        out = self.graph.correct_step(self._state("売上高は22.3兆ウォン [実績] でした。"))
+        self.assertEqual(out["correction_count"], 0)
+
+    def test_差し戻したときだけ数える(self):
+        out = self.graph.correct_step(self._state("利益率は99.9% [実績] でした。"))
+        self.assertEqual(out["status"], "running")
+        self.assertEqual(out["correction_count"], 1)
+
+    def test_差し戻せなかった場合も数えない(self):
+        s = self._state("利益率は99.9% [実績] でした。")
+        s["step_count"] = 10                      # 差し戻せない
+        out = self.graph.correct_step(s)
+        self.assertEqual(out["status"], "needs_revision")
+        self.assertEqual(out["correction_count"], 0)
+
+    def test_素通りで訂正の予算が減らない(self):
+        # 「問題なし」で2回通過しても、その後に差し戻せる
+        s = self._state("売上高は22.3兆ウォン [実績] でした。", max_corrections=2)
+        for _ in range(2):
+            out = self.graph.correct_step(s)
+            s = {**s, **out}
+        s["history"] = s["history"] + [
+            {"role": "assistant", "content": "DONE: 利益率は99.9% [実績] でした。"}]
+        out = self.graph.correct_step(s)
+        self.assertEqual(out["status"], "running", "素通りで予算を使い切っている")
