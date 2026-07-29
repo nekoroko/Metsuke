@@ -18,20 +18,20 @@ import re
 # 韓国語ソース（NAVER金融、韓国メディア）から得た数値が
 # まるごと抽出できておらず、株価の暴落（-14.65%）が台帳に載らなかった。
 SCALE = {
-    "兆": 10 ** 12, "億": 10 ** 8, "万": 10 ** 4,
-    "조": 10 ** 12, "억": 10 ** 8, "만": 10 ** 4,
+    "兆": 10 ** 12, "億": 10 ** 8, "万": 10 ** 4, "千": 10 ** 3,
+    "조": 10 ** 12, "억": 10 ** 8, "만": 10 ** 4, "천": 10 ** 3,
 }
 
 # 単位付きの数値のみを対象にする。単位の無い裸の数値は、日付・件数・IDと
 # 区別できず誤検出の温床になるため拾わない。
-_UNITS = "ウォン|원|円|ドル|달러|%|％|퍼센트"
+_UNITS = "ウォン|원|円|ドル|달러|%|％|퍼센트|KRW|JPY|USD"
 
 # 符号。韓国語の「마이너스」（マイナス）も負号として扱う。
 _SIGN = r"[-−▲△+]|마이너스\s*|마이나스\s*"
 
 TOKEN_RE = re.compile(
     r"(?P<sign>" + _SIGN + r")?"
-    r"(?P<n1>\d[\d,]*(?:\.\d+)?)(?P<s1>兆|億|万|조|억|만)?"
+    r"(?P<n1>\d[\d,]*(?:\.\d+)?)(?P<s1>兆|億|万|千|조|억|만|천)?"
     r"(?:(?P<n2>\d[\d,]*)(?P<s2>億|万|억|만))?"   # 「52兆5763億」「78조9680억」のような複合表記
     r"\s*(?P<unit>" + _UNITS + r")"
 )
@@ -81,8 +81,9 @@ def _context(text: str, start: int, end: int) -> str:
 # 同じ通貨なので、同一視しないと照合が成立しない。
 _UNIT_ALIASES = {
     "％": "%", "퍼센트": "%",
-    "원": "ウォン",
-    "달러": "ドル",
+    "원": "ウォン", "KRW": "ウォン",
+    "달러": "ドル", "USD": "ドル",
+    "JPY": "円",
 }
 
 
@@ -194,8 +195,12 @@ def collect_from_text(text: str, source: str = "", step: int = 0) -> list[dict]:
     """
     items = []
     for n in extract_numbers(text):
+        # 実績か予想かは収集の時点で機械的に決めておく。書く側の判断に
+        # 委ねると混同が繰り返されるため、台帳側を正とする（§7）。
         items.append({"kind": "number", "raw": n["raw"], "context": n["context"],
-                      "source": source, "step": step})
+                      "source": source, "step": step,
+                      "value_type": classify_value_type(
+                          sentence_containing(n["context"], n["raw"]))})
     for d in extract_dates(text):
         items.append({"kind": "date", "raw": d["raw"], "context": d["context"],
                       "source": source, "step": step})
@@ -244,7 +249,9 @@ def format_findings(findings: list[dict], max_items: int = 40,
         if len(ctx) > 45:
             ctx = ctx[:45] + "…"
         src = f.get("source", "")
-        line = f"- {f['raw']}（{ctx}）" + (f" ／ {src}" if src else "")
+        vtype = f.get("value_type", "")
+        tag = f" {VALUE_TYPE_TAGS[vtype]}" if vtype in VALUE_TYPE_TAGS else ""
+        line = f"- {f['raw']}{tag}（{ctx}）" + (f" ／ {src}" if src else "")
         if used + len(line) > char_budget and picked:
             break
         picked.append(line)
@@ -493,4 +500,375 @@ def sign_conflicts(text: str) -> list[dict]:
                 if _sign_of(r["raw"]) != _sign_of(a["raw"]):
                     out.append({"rate": r["raw"], "amount": a["raw"],
                                 "context": sentence.strip()[:60]})
+    return out
+
+
+# ===== ラベルと数値の対応、値の種別 =====
+
+# 出典側が「確定した実績」と書いているときに現れる語。
+ACTUAL_WORDS = (
+    "実績", "確定", "発表した", "計上", "終値", "確報", "速報値", "記録した",
+    "だった", "となった", "실적", "확정", "종가",
+)
+
+# 通貨コード表記。出典ページが KRW/JPY/USD で書いている場合に拾う。
+CURRENCY_CODES = {"KRW": "ウォン", "JPY": "円", "USD": "ドル"}
+
+# ラベルとして採る文字列の最大長。長すぎる前置きはラベルではない。
+LABEL_MAX = 12
+
+# ラベルの区切りになる文字（この手前までをラベルとみなす）
+_LABEL_STOP = "。．.、,，:：（）()「」『』/／|｜\n\t 　*-–—"
+_LABEL_PARTICLES = ("は", "が", "を", "の", "も", "で", "に", "と")
+
+
+_SCALE_CHARS = "兆億万千조억만천"
+
+
+def strip_particle(label: str) -> str:
+    # 末尾の助詞と、先頭に残った桁の文字（「億売買代金」の「億」）を落とす
+    while label and label[-1] in _LABEL_PARTICLES:
+        label = label[:-1]
+    return label.lstrip(_SCALE_CHARS).strip()
+
+
+def label_before(text: str, start: int) -> str:
+    """数値の直前にあるラベルを返す（「営業利益は9.2兆ウォン」→「営業利益」）。"""
+    head = (text or "")[:start]
+    out = []
+    for ch in reversed(head):
+        if ch in _LABEL_STOP or ch.isdigit() or len(out) >= LABEL_MAX:
+            break
+        out.append(ch)
+    return strip_particle("".join(reversed(out)).strip())
+
+
+def label_after(text: str, end: int) -> str:
+    """
+    数値の直後にあるラベルを返す。
+
+    株価サイトの表をテキスト化すると「41.74億売買代金0.55%売買回転率」の
+    ように、値のうしろにラベルが来る並びになることがある。前だけを見ると
+    「売買代金」を1つずれて拾い、誤ったラベルと数値の組ができる。
+    """
+    tail = (text or "")[end:]
+    out = []
+    for ch in tail:
+        if ch in _LABEL_STOP or ch.isdigit() or len(out) >= LABEL_MAX:
+            break
+        out.append(ch)
+    return strip_particle("".join(out).strip())
+
+
+# 数値の後ろに来る文末表現はラベルではない
+_NON_LABELS = ("です", "でした", "だった", "でしたが", "となった", "になった",
+               "であり", "となり", "から", "まで", "ほど", "程度", "以上", "以下")
+
+
+def _clean_label(label: str) -> str:
+    if not label:
+        return ""
+    if label in _NON_LABELS or label.endswith(("です", "でした", "ました", "だった")):
+        return ""
+    return label
+
+
+def primary_label(entry: dict) -> str:
+    """表示に使うラベル。前にあるものを優先する。"""
+    return entry.get("label_before") or entry.get("label_after") or ""
+
+
+def labeled_values(text: str) -> list[dict]:
+    """
+    テキストから (ラベル, 値) の組を作る。
+
+    前後どちらにラベルが来る書式もあるため両方を持たせ、照合側で
+    「どちらかが一致すれば同じラベルの値」とみなす。
+    """
+    out = []
+    for n in extract_numbers(text or ""):
+        out.append({
+            "raw": n["raw"],
+            "value": n["value"],
+            "unit": n["unit"],
+            "label_before": _clean_label(label_before(text, n["start"])),
+            "label_after": _clean_label(label_after(text, n["end"])),
+            "context": n["context"],
+        })
+    return out
+
+
+def _labels_of(entry: dict) -> set:
+    return {l for l in (entry.get("label_before", ""), entry.get("label_after", "")) if l}
+
+
+_HANGUL = re.compile(r"[\uac00-\ud7a3]")
+
+# 助詞や空白で区切られた「文章」か、区切りの無い「表のなれの果て」か。
+# ラベルを隣接位置から拾えるのは後者だけで、文章に対して同じ判定をすると
+# 「28日の終値は前日比-14.65%」の -14.65% を「前日比」以外と呼んだだけで
+# 食い違い扱いになってしまう。
+_PROSE_MARKERS = ("は", "が", "の", "を", "に", "で", "と", " ", "　", "、", "。")
+
+
+def looks_tabular(context: str, window: int = 14) -> bool:
+    """数値の周りが、区切りの無いフィールドの羅列になっているか。"""
+    text = (context or "")
+    if not text:
+        return False
+    return not any(m in text for m in _PROSE_MARKERS)
+
+
+def _comparable_labels(a: str, b: str) -> bool:
+    """
+    ラベル同士を突き合わせてよいか。
+
+    出典が韓国語（영업이익）で回答が日本語（営業利益）というのは通常の
+    運用であり、文字種が違うだけで「食い違い」と判定してはいけない。
+    """
+    if not a or not b:
+        return False
+    return bool(_HANGUL.search(a)) == bool(_HANGUL.search(b))
+
+
+def _labels_conflict(answer_labels: set, source_labels: set) -> bool:
+    """回答のラベルと出典のラベルが、比較可能なうえで一致しないか。"""
+    comparable = [(a, s) for a in answer_labels for s in source_labels
+                  if _comparable_labels(a, s)]
+    if not comparable:
+        return False
+    return not any(a == s or a in s or s in a for a, s in comparable)
+
+
+def classify_value_type(context: str) -> str:
+    """
+    出典の文脈から、その数値が実績か予想かを機械的に判定する。
+
+    戻り値は "actual" / "forecast" / "unknown"。
+    フリーテキストの [実績] タグに頼らず、収集の時点で型を付けるための関数。
+    予想語と実績語が同居する場合は、予想を優先して安全側に倒す。
+    """
+    text = context or ""
+    if any(w in text for w in FORECAST_WORDS):
+        return "forecast"
+    if any(w in text for w in ACTUAL_WORDS):
+        return "actual"
+    return "unknown"
+
+
+VALUE_TYPE_TAGS = {"actual": ACTUAL_TAG, "forecast": FORECAST_TAG, "unknown": UNKNOWN_TAG}
+
+
+def label_value_mismatches(answer: str, findings: list, source_text: str = "") -> list[dict]:
+    """
+    回答の「ラベル: 値」の組が、出典側の組と食い違っているものを返す。
+
+    値そのものは出典のどこかに存在するため、値の照合だけではすり抜ける。
+    実測で、区切りの無い株価データ（「41.74億売買代金0.55%売買回転率」）から
+    ラベルを1つずらして拾った組が、そのまま検証を通過している。
+
+    source_text には検索結果の原文を渡す。「回答のラベルが出典に存在するのに
+    別の値へ付いている」ときだけ付け替えとみなすため。出典に無いラベル
+    （出典の「終値」を回答が「株価」と書く等）は、言い換えであって誤りではない。
+    """
+    source = []
+    for f in findings or []:
+        if f.get("kind") != "number":
+            continue
+        for lv in labeled_values(f.get("context", "")):
+            source.append(lv)
+    if not source:
+        return []
+
+    out = []
+    for a in labeled_values(answer or ""):
+        labels = _labels_of(a)
+        if not labels:
+            continue
+
+        # (a) 同じラベルが出典にあるのに、値が違う
+        same_label = [s for s in source if labels & _labels_of(s)]
+        if same_label:
+            if any(s["unit"] == a["unit"] and matches_any(a, [s]) for s in same_label):
+                continue                   # ラベルも値も一致
+            out.append({
+                "label": primary_label(a),
+                "raw": a["raw"],
+                "expected": [s["raw"] for s in same_label][:3],
+                "reason": "value",
+                "context": a["context"],
+            })
+            continue
+
+        # (b) 値は出典にあるが、出典ではそのラベルが別の値に付いている
+        if not any(l in (source_text or "") for l in labels):
+            continue                       # 出典に無いラベル＝言い換え。判定しない
+        same_value = [s for s in source
+                      if s["unit"] == a["unit"] and matches_any(a, [s])]
+        for s in same_value:
+            if not looks_tabular(sentence_containing(s["context"], s["raw"])):
+                continue                   # 文章。隣接ラベルの一致は要求できない
+            if _labels_conflict(labels, _labels_of(s)):
+                out.append({
+                    "label": primary_label(a),
+                    "raw": a["raw"],
+                    "expected": sorted(_labels_of(s))[:3],
+                    "reason": "label",
+                    "context": s["context"],
+                })
+                break
+    return out
+
+
+def candidates_for(entry: dict, findings: list, limit: int = 3) -> list[str]:
+    """置き換え候補になりうる値を台帳から探す（同じ単位のものを新しい順に）。"""
+    out = []
+    for f in reversed(findings or []):
+        if f.get("kind") != "number":
+            continue
+        parsed = extract_numbers(f.get("raw", ""))
+        if not parsed or parsed[0]["unit"] != entry.get("unit"):
+            continue
+        if f["raw"] in out:
+            continue
+        out.append(f["raw"])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def tag_conflicts(answer: str, findings: list) -> list[dict]:
+    """
+    回答の [実績]/[予想] タグが、台帳に記録した value_type と食い違うものを返す。
+
+    タグをフリーテキストの判断に委ねると混同が繰り返される。収集時点で
+    機械的に付けた型（classify_value_type）を正とし、書かれたタグと突き合わせる。
+    """
+    out = []
+    for n in extract_numbers(answer or ""):
+        written = tag_after(answer, n["end"])
+        if not written or written == UNKNOWN_TAG:
+            continue
+        for f in findings or []:
+            if f.get("kind") != "number":
+                continue
+            parsed = extract_numbers(f.get("raw", ""))
+            if not parsed or not matches_any(n, parsed):
+                continue
+            vtype = f.get("value_type") or classify_value_type(
+                sentence_containing(f.get("context", ""), f.get("raw", "")))
+            if vtype == "unknown":
+                break
+            expected = VALUE_TYPE_TAGS[vtype]
+            if expected != written:
+                out.append({"raw": n["raw"], "written": written,
+                            "expected": expected, "context": f.get("context", "")})
+            break
+    return out
+
+
+UNVERIFIED_MARK = "（出典未確認）"
+
+
+def mechanical_fixes(answer: str, findings: list, history: list = None) -> tuple:
+    """
+    差し戻す予算が無いときに、機械だけで確実に直せる分を適用する。
+
+    やることは2つだけ。判断が要る書き換えはしない。
+      1. 種別タグが台帳と食い違っているものを、台帳の型に合わせる
+      2. 出典に見当たらない数値の直後に「（出典未確認）」を付ける
+
+    戻り値は (直した本文, 適用した内容のリスト)。
+    """
+    text = answer or ""
+    applied = []
+
+    for t in tag_conflicts(text, findings or []):
+        pattern = re.escape(t["raw"]) + r"(\s*)" + re.escape(t["written"])
+        new_text, count = re.subn(pattern, t["raw"] + r"\1" + t["expected"], text, count=1)
+        if count:
+            text = new_text
+            applied.append(
+                f"「{t['raw']}」の種別を {t['written']} から {t['expected']} に直しました"
+                f"（出典の文脈に基づく）"
+            )
+
+    known = []
+    for e in (history or []):
+        if e.get("role") == "result":
+            known.extend(extract_numbers(e.get("content", "")))
+    for f in findings or []:
+        if f.get("kind") == "number":
+            known.extend(extract_numbers(f.get("raw", "")))
+
+    # 位置がずれないよう、後ろから挿入する
+    for n in sorted(extract_numbers(text), key=lambda x: x["end"], reverse=True):
+        if matches_any(n, known):
+            continue
+        if text[n["end"]:n["end"] + len(UNVERIFIED_MARK)] == UNVERIFIED_MARK:
+            continue
+        text = text[:n["end"]] + UNVERIFIED_MARK + text[n["end"]:]
+        applied.append(f"「{n['raw']}」に{UNVERIFIED_MARK}を付けました（出典に見当たらないため）")
+
+    return text, applied
+
+
+def confirmed_from(answer: str, findings: list) -> list[dict]:
+    """
+    出典と一致した数値を「確定済みフィールド」として抜き出す。
+
+    一度検証を通った値が、次の書き直しで理由なく差し替わる後退を
+    防ぐために使う（実測で、実績値が消えて予想値に入れ替わっている）。
+    """
+    out = []
+    for lv in labeled_values(answer or ""):
+        for f in findings or []:
+            if f.get("kind") != "number":
+                continue
+            parsed = extract_numbers(f.get("raw", ""))
+            if parsed and matches_any(lv, parsed):
+                out.append({
+                    "raw": lv["raw"],
+                    "label": primary_label(lv),
+                    "value_type": f.get("value_type", "unknown"),
+                })
+                break
+    return out
+
+
+def merge_confirmed(existing: list, new: list, limit: int = 20) -> list[dict]:
+    out = list(existing or [])
+    seen = {(c["raw"], c.get("label", "")) for c in out}
+    for c in new or []:
+        key = (c["raw"], c.get("label", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out[-limit:]
+
+
+def format_confirmed(confirmed: list, char_budget: int = 400) -> str:
+    """確定済みフィールドをプロンプトへ埋め込む。"""
+    lines, used = [], 0
+    for c in reversed(confirmed or []):
+        tag = VALUE_TYPE_TAGS.get(c.get("value_type", ""), "")
+        line = f"- {c.get('label') or '（ラベルなし）'}: {c['raw']} {tag}".rstrip()
+        if used + len(line) > char_budget and lines:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(reversed(lines))
+
+
+def missing_confirmed(answer: str, confirmed: list) -> list[dict]:
+    """確定済みなのに、今回の回答から消えた値を返す。"""
+    now = extract_numbers(answer or "")
+    out = []
+    for c in confirmed or []:
+        parsed = extract_numbers(c.get("raw", ""))
+        if not parsed:
+            continue
+        if not matches_any(parsed[0], now):
+            out.append(c)
     return out

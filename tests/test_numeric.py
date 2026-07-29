@@ -808,3 +808,244 @@ class TestReviewerConstraints(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestLabelValueMatching(unittest.TestCase):
+    """ラベルと数値の対応が出典と合っているか（意味照合）"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        self.checker = numeric_checker
+        # 区切りの無い株価データ。ラベルは値の後ろに来る
+        # 実際の株価ページは、配当利回りも同じ表に並んでいる
+        self.raw = "配当利回り--41.74億売買代金0.55%売買回転率"
+        self.findings = [{"kind": "number", "raw": "0.55%",
+                          "context": self.raw, "value_type": "unknown"}]
+
+    def test_別ラベルに付け替えたら指摘する(self):
+        r = self.checker(output="配当利回りは0.55% [実績] です。",
+                         findings=self.findings,
+                         history=[{"role": "result", "content": self.raw}])
+        joined = " ".join(r["issues"])
+        self.assertIn("売買回転率", joined)
+        self.assertIn("配当利回り", joined)
+
+    def test_正しいラベルなら指摘しない(self):
+        r = self.checker(output="売買回転率は0.55% [実績] です。",
+                         findings=self.findings,
+                         history=[{"role": "result", "content": self.raw}])
+        self.assertNotIn("ラベルの対応", " ".join(r["issues"]))
+
+    def test_同じラベルで値が違えば指摘する(self):
+        findings = [{"kind": "number", "raw": "22.3兆ウォン",
+                     "context": "売上高は22.3兆ウォンだった", "value_type": "actual"}]
+        r = self.checker(output="売上高は9.2兆ウォン [実績] でした。", findings=findings,
+                         history=[{"role": "result", "content": "売上高は22.3兆ウォンだった。営業利益は9.2兆ウォン"}])
+        self.assertIn("出典と違います", " ".join(r["issues"]))
+
+    def test_出典に無いラベルは言い換えとみなす(self):
+        findings = [{"kind": "number", "raw": "-14.65%",
+                     "context": "28日終値は-14.65%", "value_type": "actual"}]
+        r = self.checker(output="株価は-14.65% [実績] でした。", findings=findings,
+                         history=[{"role": "result", "content": "28日終値は-14.65%"}])
+        self.assertNotIn("ラベルの対応", " ".join(r["issues"]))
+
+    def test_文章の隣接ラベル違いは指摘しない(self):
+        # 「28日の終値は前日比-14.65%」を「終値」と書くのは言い換えであって誤りではない
+        findings = [{"kind": "number", "raw": "-14.65%",
+                     "context": "28日の終値は前日比-14.65%", "value_type": "actual"}]
+        r = self.checker(output="終値は-14.65% [実績] でした。", findings=findings,
+                         history=[{"role": "result", "content": "28日の終値は前日比-14.65%"}])
+        self.assertNotIn("ラベルの対応", " ".join(r["issues"]))
+
+    def test_言語が違うラベルは食い違い扱いしない(self):
+        findings = [{"kind": "number", "raw": "9.2兆ウォン",
+                     "context": "영업이익은 9.2조원을 기록", "value_type": "actual"}]
+        r = self.checker(output="営業利益は9.2兆ウォン [実績] でした。", findings=findings,
+                         history=[{"role": "result", "content": "영업이익은 9.2조원을 기록"}])
+        self.assertNotIn("ラベルの対応", " ".join(r["issues"]))
+
+
+class TestMechanicalFixes(unittest.TestCase):
+    """差し戻せないときに機械だけで直せる分を適用する"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        self.numeric = numeric
+        self.findings = numeric.collect_from_text(
+            "売上高は22.3兆ウォンだった。コンセンサスは84.1兆ウォンの見通し。",
+            source="web_search(x)")
+        self.history = [{"role": "result",
+                         "content": "売上高は22.3兆ウォンだった。コンセンサスは84.1兆ウォンの見通し。"}]
+
+    def test_種別タグを台帳に合わせて直す(self):
+        text, applied = self.numeric.mechanical_fixes(
+            "予想は84.1兆ウォン [実績] です。", self.findings, self.history)
+        self.assertIn("84.1兆ウォン [予想]", text)
+        self.assertTrue(applied)
+
+    def test_未照合の数値に注記を付ける(self):
+        text, applied = self.numeric.mechanical_fixes(
+            "利益率は99.9%でした。", self.findings, self.history)
+        self.assertIn("99.9%（出典未確認）", text)
+
+    def test_正しい記述は書き換えない(self):
+        original = "売上高は22.3兆ウォン [実績] でした。"
+        text, applied = self.numeric.mechanical_fixes(original, self.findings, self.history)
+        self.assertEqual(text, original)
+        self.assertEqual(applied, [])
+
+    def test_correctが予算切れで機械修正を適用する(self):
+        import graph
+        from state import make_initial_state
+        state = make_initial_state("決算")
+        state["findings"] = self.findings
+        state["history"] = self.history + [
+            {"role": "assistant", "content": "DONE: 予想は84.1兆ウォン [実績] です。"}]
+        state["step_count"] = 10          # 差し戻せない
+        out = graph.correct_step(state)
+        done = [e for e in out["history"] if e["role"] == "assistant"][-1]["content"]
+        self.assertIn("84.1兆ウォン [予想]", done)
+        self.assertTrue(any("種別を" in n for n in out["verification_notes"]))
+
+
+class TestConfirmedFields(unittest.TestCase):
+    """検証済みの数値は次の書き直しで守る"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph
+        from state import make_initial_state
+        from numeric import collect_from_text
+        self.graph = graph
+        self.findings = collect_from_text(
+            "売上高は22.3兆ウォンだった。28日終値は-14.65%。", source="web_search(x)")
+        self.state = make_initial_state("決算と株価")
+        self.state["findings"] = self.findings
+        self.state["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォンだった。28日終値は-14.65%。"},
+            {"role": "assistant",
+             "content": "DONE: 売上高は22.3兆ウォン [実績]、株価は-14.65% [実績]。"},
+        ]
+        self.state["step_count"] = 3
+
+    def test_検証済みの数値が確定済みに積まれる(self):
+        out = self.graph.correct_step(self.state)
+        raws = [c["raw"] for c in out["confirmed"]]
+        self.assertIn("22.3兆ウォン", raws)
+        self.assertIn("-14.65%", raws)
+
+    def test_確定済みが消えたら指摘する(self):
+        out = self.graph.correct_step(self.state)
+        nxt = {**self.state, "confirmed": out["confirmed"]}
+        nxt["history"] = self.state["history"] + [
+            {"role": "assistant", "content": "DONE: 売上高は22.3兆ウォン [実績] のみ。"}]
+        out2 = self.graph.correct_step(nxt)
+        feedback = out2["history"][-1]["content"]
+        self.assertIn("確定済みの値「-14.65%」", feedback)
+
+    def test_書き直しの差分がtraceに残る(self):
+        # 1回目のDONEでは比較対象が無いので差分は空。2回目から出る
+        self.state["history"].append(
+            {"role": "assistant", "content": "DONE: 売上高は22.3兆ウォン [実績] のみ。"})
+        out = self.graph.correct_step(self.state)
+        note = out["trace"][-1]["note"]
+        self.assertIn("削除: -14.65%", note)
+
+
+class TestReactSearchGuards(unittest.TestCase):
+    """ReActループの検索まわり（重複抑止・本文自動取得・見落とし防止）"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph
+        self.graph = graph
+        self.result = (
+            "タイトル: SKハイニックス、営業益が急増\n"
+            "URL: https://example.com/a\n"
+            "概要: 営業利益は9.2兆ウォンだった。\n"
+            "---\n"
+            "タイトル: 株価はRockets 14%\n"
+            "URL: https://example.com/b\n"
+            "概要: 28日終値は-14.65%。"
+        )
+
+    def test_重複クエリの判定は語順を無視する(self):
+        self.assertTrue(self.graph.is_duplicate_query(
+            "決算 SKハイニックス", ["SKハイニックス 決算"]))
+        self.assertFalse(self.graph.is_duplicate_query(
+            "SKハイニックス 決算 実績", ["SKハイニックス 決算"]))
+
+    def test_未使用の切り口を返す(self):
+        angles = self.graph.unused_angles("SKハイニックス 決算", ["SKハイニックス 決算 結果"])
+        self.assertNotIn("結果", angles)
+        self.assertIn("実績", angles)
+
+    def test_見出しと数値の自動抽出(self):
+        from numeric import collect_from_text
+        summary = self.graph.summarize_hits(
+            self.result, collect_from_text(self.result, source="web_search(x)"))
+        self.assertIn("Rockets 14%", summary)
+        self.assertIn("9.2兆ウォン", summary)
+
+    def test_本文を自動取得して履歴に積む(self):
+        import tools
+        orig = tools.fetch_url
+        tools.fetch_url = lambda url: f"{url} の本文。営業利益は9.2兆ウォンで過去最高。"
+        try:
+            blocks, attempted = self.graph.auto_fetch_sources(self.result, {"fetched_urls": []})
+        finally:
+            tools.fetch_url = orig
+        self.assertEqual(len(blocks), 2)
+        self.assertIn("https://example.com/a", attempted)
+
+    def test_失敗したURLは再訪しない(self):
+        import tools
+        orig = tools.fetch_url
+        tools.fetch_url = lambda url: "エラー: 403"
+        try:
+            blocks, attempted = self.graph.auto_fetch_sources(
+                self.result, {"fetched_urls": ["https://example.com/a"]})
+        finally:
+            tools.fetch_url = orig
+        self.assertNotIn("https://example.com/a", [b["url"] for b in blocks])
+
+    def test_発表予定を過ぎていれば結果確認を促す(self):
+        from numeric import collect_from_text
+        findings = collect_from_text("7月29日に第2四半期決算の発表を控える",
+                                     source="web_search(x)")
+        nudge = self.graph._pending_result_nudge(
+            {"findings": findings, "queries_done": ["SKハイニックス 決算"]})
+        self.assertIn("結果", nudge)
+
+    def test_結果を検索済みなら促さない(self):
+        from numeric import collect_from_text
+        findings = collect_from_text("7月29日に第2四半期決算の発表を控える",
+                                     source="web_search(x)")
+        nudge = self.graph._pending_result_nudge(
+            {"findings": findings, "queries_done": ["SKハイニックス 決算 結果"]})
+        self.assertEqual(nudge, "")
+
+
+class TestVerifyBudgetNote(unittest.TestCase):
+    """品質判定の予算切れ後は「未検証」であることを残す"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph
+        from state import make_initial_state
+        self.graph = graph
+        self.state = make_initial_state("株価")
+        self.state["tool_verify_count"] = 6
+        self.state["max_tool_verifies"] = 6
+
+    def test_未検証である旨を注記に積む(self):
+        out = self.graph.verify_tool_step(self.state)
+        self.assertTrue(any("未検証" in n for n in out["verification_notes"]))
+
+    def test_同じ注記を重複させない(self):
+        out = self.graph.verify_tool_step(self.state)
+        out2 = self.graph.verify_tool_step({**self.state, **out})
+        self.assertEqual(len(out2["verification_notes"]), 1)

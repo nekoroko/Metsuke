@@ -10,7 +10,8 @@ from reviewers import (
 )
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
-    claims_absence, unused_numbers,
+    claims_absence, unused_numbers, extract_numbers, mechanical_fixes,
+    confirmed_from, merge_confirmed, missing_confirmed, format_confirmed,
 )
 from datetime import datetime
 
@@ -295,6 +296,8 @@ def _force_finalize(state: AgentState):
         elif entry["role"] == "result":
             history_summary += f"\n[Result] {snippet}\n"
 
+    ledger = format_findings(state.get("findings", []), char_budget=900)
+
     prompt = (
         "ステップ数の上限に達しました。新しい調査はもうできません。\n"
         "これまでの調査結果だけを使って、タスクへの回答をまとめてください。\n"
@@ -303,7 +306,10 @@ def _force_finalize(state: AgentState):
         "箇条書き中心で、600文字程度を目安に簡潔にまとめてください。\n"
         "回答は必ず 'DONE: ' から始めてください。\n\n"
         f"タスク: {state['task']}\n\n"
-        f"これまでの調査結果:\n{history_summary}\n"
+        + (f"これまでに取得した数値・日付（この一覧から漏れなく拾うこと）:\n{ledger}\n\n"
+           if ledger else "")
+        + f"これまでの調査結果:\n{history_summary}\n"
+        + "「確認できませんでした」と書くのは、上の一覧にも該当が無い項目だけにしてください。\n"
     )
 
     messages = [
@@ -320,6 +326,104 @@ def _force_finalize(state: AgentState):
         return content
     except Exception:
         return None
+
+
+# ===== 検索まわりの機械的な補助（ReActループ） =====
+
+# 検索結果を受け取ったあと、上位何件の本文を自動で取りに行くか。
+AUTO_FETCH_TOP_N = 2
+# 同じURLへの再試行はこの回数まで（403のページを何度も叩かない）
+MAX_FETCH_ATTEMPTS = 1
+# 別の切り口として使う語。重複クエリを弾いたときの代案に使う。
+QUERY_ANGLES = ("結果", "実績", "速報", "発表後 反応", "推移")
+
+
+def _normalize_query(q: str) -> str:
+    return " ".join(sorted((q or "").lower().split()))
+
+
+def is_duplicate_query(query: str, queries_done: list) -> bool:
+    """語順や大文字小文字の違いを無視して、実行済みかどうかを判定する。"""
+    norm = _normalize_query(query)
+    return any(norm == _normalize_query(q) for q in (queries_done or []))
+
+
+def unused_angles(query: str, queries_done: list) -> list[str]:
+    """まだ使っていない切り口の語を返す。"""
+    done = " ".join(queries_done or []) + " " + (query or "")
+    return [a for a in QUERY_ANGLES if a.split()[0] not in done]
+
+
+def summarize_hits(result: str, findings_added: list) -> str:
+    """
+    検索結果の見出しと、そこから拾えた数値を1ブロックにまとめる。
+
+    実測で、「Rockets 14%」のような見出しや数値が結果に入っていたのに
+    無視して「情報が得られなかった」と書いた事例がある。モデルに
+    読み落とすなと言うより、拾えたものを機械で並べて見せる方が確実。
+    """
+    titles = re.findall(r"^タイトル:\s*(.+)$", result or "", re.MULTILINE)
+    nums = [f["raw"] for f in findings_added if f.get("kind") == "number"][:8]
+    lines = []
+    if titles:
+        lines.append("見出し: " + " / ".join(t.strip()[:40] for t in titles[:3]))
+    if nums:
+        lines.append("この検索で拾えた数値: " + "、".join(nums))
+    if not lines:
+        return ""
+    return "（自動抽出）" + "\n".join(lines)
+
+
+def auto_fetch_sources(result: str, state: dict, limit: int = AUTO_FETCH_TOP_N):
+    """
+    検索結果の上位URLの本文を自動で取りに行く。
+
+    スニペットだけで完結して DONE に至る実行が実測で出ている。
+    「本文を読め」とプロンプトで頼むより、コードが読んで履歴に置く方が確実。
+    取得済み・失敗済みのURLは再訪しない。
+    """
+    from tools import fetch_url as _fetch
+    attempted = list(state.get("fetched_urls", []))
+    blocks = []
+    for m in re.finditer(r"^URL:\s*(\S+)", result or "", re.MULTILINE):
+        url = m.group(1).strip()
+        if attempted.count(url) >= MAX_FETCH_ATTEMPTS:
+            continue
+        attempted.append(url)
+        try:
+            body = _fetch(url)
+        except Exception as e:
+            body = f"エラー: {e}"
+        if body.startswith("エラー") or body.startswith("本文を抽出できません"):
+            blocks.append({"url": url, "text": "", "error": body[:120]})
+        else:
+            blocks.append({"url": url, "text": body})
+        if len([b for b in blocks if b.get("text")]) >= limit:
+            break
+    return blocks, attempted
+
+
+def _pending_result_nudge(state: dict) -> str:
+    """
+    発表予定を掴んでいるのに結果を調べていないとき、促す文面を返す。
+
+    THOUGHT の自然な流れに任せると飛ばされるため、条件が揃った時点で
+    コード側から差し込む。既に「結果／実績／速報」で検索していれば何もしない。
+    """
+    warnings = pending_event_warnings(state.get("findings", []))
+    if not warnings:
+        return ""
+    done = " ".join(state.get("queries_done", []))
+    if any(w in done for w in ("結果", "実績", "速報")):
+        return ""
+    return (
+        "（自動チェック）取得済みの情報に発表予定の記述があり、その日はすでに"
+        "過ぎているか間近です:\n"
+        + "\n".join(f"- {w}" for w in warnings[:2])
+        + "\n発表済みかどうかを確かめるため、「結果」「実績」「速報」のいずれかを"
+        "含むクエリで web_search を1回実行してください。"
+        "確認せずに予想値を実績として書かないでください。"
+    )
 
 
 def react_step(state: AgentState) -> AgentState:
@@ -419,6 +523,23 @@ def react_step(state: AgentState) -> AgentState:
     action = parse_action(llm_output)
     new_history = state["history"] + [{"role": "assistant", "content": llm_output}]
 
+    # 「◯日に発表」を掴んでいて、その日が過ぎているのに結果を調べていない場合、
+    # 次の行動を選ぶ前に確認を促す。予想値を実績として書く事故はここを
+    # 飛ばしたときに起きる（1タスクにつき1回だけ）。
+    nudge = _pending_result_nudge(state)
+    if nudge and action["type"] != "tool":
+        new_history.append({"role": "result", "content": nudge})
+        return _with_trace(state, {
+            **state,
+            "history": new_history,
+            "status": "running",
+            "step_count": state["step_count"] + 1,
+            "reasoning_detected": reasoning_detected,
+            "last_action_type": "unknown",
+            "last_tool_name": "",
+        }, "react", "発表結果の確認を促した", "react",
+            note="発表予定日を過ぎているのに結果を調べていない")
+
     if action["type"] == "done":
         return _with_trace(state, {
             **state,
@@ -433,6 +554,34 @@ def react_step(state: AgentState) -> AgentState:
     elif action["type"] == "tool":
         tool_name = action.get("name", "")
         tool_fn = get_tool_fn(tool_name)
+        queries_done = list(state.get("queries_done", []))
+        fetched_urls = list(state.get("fetched_urls", []))
+        extra_notes = []
+
+        # 同じクエリの再実行は結果も同じ。実行せずに別の切り口を促す
+        if tool_name == "web_search" and is_duplicate_query(action["arg"], queries_done):
+            angles = unused_angles(action["arg"], queries_done)
+            hint = ("次はこれらの語を含む別のクエリを試してください: "
+                    + "、".join(angles[:3])) if angles else \
+                   "別の観点（英語クエリ、別の情報源）に切り替えてください。"
+            new_history.append({"role": "result", "content": (
+                f"（自動チェック）クエリ「{action['arg']}」は実行済みです。"
+                f"同じ結果しか返りません。{hint}\n"
+                f"実行済みクエリ: {'、'.join(queries_done[-6:])}"
+            )})
+            return _with_trace(state, {
+                **state,
+                "history": new_history,
+                "status": "running",
+                "step_count": state["step_count"] + 1,
+                "reasoning_detected": reasoning_detected,
+                # 検索していないので品質判定に回さない。回すと、直前の
+                # 別クエリの結果を判定して verify_tool の予算だけが減る
+                "last_action_type": "",
+                "last_tool_name": "",
+            }, "react", f"重複クエリを抑止: {action['arg'][:40]}", "react",
+                note="実行済みのため検索せず、別の切り口を促した", skipped=True)
+
         if tool_fn:
             try:
                 result = tool_fn(action["arg"])
@@ -442,32 +591,63 @@ def react_step(state: AgentState) -> AgentState:
             result = f"ツール '{tool_name}' は存在しません。generate_codeでPythonコードを生成してください。"
         new_history.append({"role": "result", "content": result})
         verifiable = is_tool_verifiable(tool_name)
+        if tool_name == "web_search":
+            queries_done.append(action["arg"])
 
         # ツール結果から数値・日付を機械抽出して台帳へ積む。
         # 履歴と違ってトリミングされないので、後のステップでも参照できる。
-        new_findings = merge_findings(
-            state.get("findings", []),
-            collect_from_text(
-                result,
-                source=f"{tool_name}({action['arg']})",
-                step=state["step_count"] + 1,
-            ),
+        collected = collect_from_text(
+            result,
+            source=f"{tool_name}({action['arg']})",
+            step=state["step_count"] + 1,
         )
+        new_findings = merge_findings(state.get("findings", []), collected)
+
+        # 検索なら、見出しと拾えた数値を並べたブロックを足し、
+        # 上位ページの本文まで機械的に取りに行く（スニペット止まりを防ぐ）
+        fetched_count = 0
+        if tool_name == "web_search":
+            summary = summarize_hits(result, collected)
+            if summary:
+                new_history.append({"role": "result", "content": summary})
+            blocks, fetched_urls = auto_fetch_sources(result, state)
+            for b in blocks:
+                if not b.get("text"):
+                    extra_notes.append(f"{b['url']} は取得失敗")
+                    continue
+                fetched_count += 1
+                excerpt = b["text"][:1200]
+                new_history.append({"role": "result", "content": (
+                    f"[本文取得] {b['url']}\n{excerpt}"
+                )})
+                new_findings = merge_findings(
+                    new_findings,
+                    collect_from_text(excerpt, source=f"fetch_url({b['url']})",
+                                      step=state["step_count"] + 1),
+                )
+
         added = len(new_findings) - len(state.get("findings", []))
+        note = f"台帳に{added}件追加"
+        if tool_name == "web_search":
+            note += f" / 本文{fetched_count}件を自動取得"
+        if not verifiable:
+            note += f" / verify_tool はスキップ（{tool_name} は品質判定の対象外）"
+        if extra_notes:
+            note += " / " + "、".join(extra_notes[:2])
+
         return _with_trace(state, {
             **state,
             "history": new_history,
             "findings": new_findings,
+            "queries_done": queries_done,
+            "fetched_urls": fetched_urls,
             "status": "running",
             "step_count": state["step_count"] + 1,
             "reasoning_detected": reasoning_detected,
             "last_action_type": "tool",
             "last_tool_name": tool_name,
         }, "react", f"ツール実行: {tool_name}({action['arg'][:40]})",
-            "verify_tool" if verifiable else "react",
-            note=(f"台帳に{added}件追加" if verifiable
-                  else f"台帳に{added}件追加 / verify_tool はスキップ"
-                       f"（{tool_name} は品質判定の対象外）"))
+            "verify_tool" if verifiable else "react", note=note)
 
     elif action["type"] == "code":
         code = action["content"]
@@ -542,11 +722,21 @@ def verify_tool_step(state: AgentState) -> AgentState:
     verify_count = state.get("tool_verify_count", 0)
 
     if verify_count >= max_verifies:
-        # 予算切れ。判定をスキップしてそのままreactに戻す
+        # 予算切れ。判定はできないが、黙って未検証の情報を積み上げない。
+        # 以降が未検証であることを1度だけ最終回答の注記に載せる。
+        note_text = (
+            f"検索結果の品質判定は上限（{max_verifies}回）に達したため、"
+            "これ以降に取得した情報は未検証です。"
+        )
+        notes = list(state.get("verification_notes", []))
+        if note_text not in notes:
+            notes.append(note_text)
         return _with_trace(state,
-            {**state, "status": "running", "tool_verify_count": verify_count + 1},
+            {**state, "status": "running", "tool_verify_count": verify_count + 1,
+             "verification_notes": notes},
             "verify_tool", "スキップ", "react",
-            note=f"判定の予算切れ（{verify_count}/{max_verifies}）", skipped=True)
+            note=f"判定の予算切れ（{verify_count}/{max_verifies}）。以降は未検証と明記",
+            skipped=True)
 
     history = state["history"]
 
@@ -647,6 +837,29 @@ def _extract_previous_done(history: list) -> str:
     return ""
 
 
+def _diff_note(previous: str, current: str) -> str:
+    """
+    前の版と今の版で、数値がどう入れ替わったかを1行にする。
+
+    「書き直したら良くなったのか悪くなったのか」が trace から読めないと、
+    後退（実績値が消えて予想値になる等）に気づけない。
+    """
+    if not previous:
+        return ""
+    before = {n["raw"] for n in extract_numbers(previous)}
+    after = {n["raw"] for n in extract_numbers(current or "")}
+    added = sorted(after - before)
+    removed = sorted(before - after)
+    if not added and not removed:
+        return "数値の増減なし"
+    parts = []
+    if added:
+        parts.append("追加: " + "、".join(added[:4]))
+    if removed:
+        parts.append("削除: " + "、".join(removed[:4]))
+    return " / ".join(parts)
+
+
 def correct_step(state: AgentState) -> AgentState:
     """
     DONEの内容を機械チェックにかけ、数値の誤りがあれば訂正を差し戻す。
@@ -711,12 +924,29 @@ def correct_step(state: AgentState) -> AgentState:
                 "何が不足しているのかをより具体的に書いてください。"
             )
 
+    # 一度検証を通った値（確定済みフィールド）が、書き直しで消えていないか。
+    # 実測で、実績値が消えて予想値に差し替わる後退が起きている。
+    for miss in missing_confirmed(done_content, state.get("confirmed", [])):
+        issues.append(
+            f"確定済みの値「{miss['raw']}」"
+            + (f"（{miss['label']}）" if miss.get("label") else "")
+            + "が今回の回答から消えています。検証済みの値なので戻してください。"
+        )
+
+    # 出典と一致した数値を確定済みに積む。次の書き直しで守る対象になる。
+    confirmed = merge_confirmed(
+        state.get("confirmed", []),
+        confirmed_from(done_content, state.get("findings", [])),
+    )
+    diff_note = _diff_note(_extract_previous_done(state["history"]), done_content)
+
     if not issues:
         return _with_trace(state, {
             **state,
+            "confirmed": confirmed,
             "status": "needs_revision",
             "correction_count": state.get("correction_count", 0) + 1,
-        }, "correct", "数値の機械照合: 問題なし", "critic")
+        }, "correct", "数値の機械照合: 問題なし", "critic", note=diff_note)
 
     # 差し戻せるかどうかは予算次第。差し戻せない場合でも検証は済んでいるので、
     # 結果を捨てずに verification_notes へ残し、最終回答に注記として出す。
@@ -731,13 +961,28 @@ def correct_step(state: AgentState) -> AgentState:
     )
 
     if not can_retry:
+        # 差し戻せないが、機械だけで確実に直せるもの（種別タグの是正と
+        # 未照合数値の注記）は、予算外の軽量パスとしてその場で適用する。
+        fixed_text, applied = mechanical_fixes(
+            done_content, state.get("findings", []), state["history"])
+        new_history = list(state["history"])
+        if applied:
+            for i in range(len(new_history) - 1, -1, -1):
+                entry = new_history[i]
+                if entry.get("role") == "assistant" and "DONE:" in entry.get("content", ""):
+                    head = entry["content"].split("DONE:")[0]
+                    new_history[i] = {"role": "assistant",
+                                      "content": f"{head}DONE: {fixed_text}"}
+                    break
         return _with_trace(state, {
             **state,
+            "history": new_history,
+            "confirmed": confirmed,
             "status": "needs_revision",
-            "verification_notes": state.get("verification_notes", []) + issues,
+            "verification_notes": state.get("verification_notes", []) + issues + applied,
             "correction_count": state.get("correction_count", 0) + 1,
         }, "correct", f"数値の問題を{len(issues)}件検出（差し戻せず）", "critic",
-            note="訂正の予算切れ。最終回答に注記として残す")
+            note=f"訂正の予算切れ。機械的に{len(applied)}件だけ適用し、残りは注記に回す")
 
     feedback = "（自動訂正チェック）最終回答に問題があります。\n"
     feedback += "\n".join(f"- {i}" for i in issues)
@@ -756,9 +1001,11 @@ def correct_step(state: AgentState) -> AgentState:
     return _with_trace(state, {
         **state,
         "history": state["history"] + [{"role": "result", "content": feedback}],
+        "confirmed": confirmed,
         "status": "running",
         "correction_count": state.get("correction_count", 0) + 1,
-    }, "correct", f"数値の問題を{len(issues)}件検出", "react", note="訂正を差し戻した")
+    }, "correct", f"数値の問題を{len(issues)}件検出", "react",
+        note="訂正を差し戻した" + (f" / {diff_note}" if diff_note else ""))
 
 
 def critic_step(state: AgentState) -> AgentState:

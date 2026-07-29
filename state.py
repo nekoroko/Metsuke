@@ -28,6 +28,8 @@ class AgentState(TypedDict):
     queries_done: list[str]   # 実行済みクエリ（同じクエリの空回りを防ぐ）
     compose_count: int        # レポートを書いた回数（差し戻しを含む）
     max_composes: int         # レポート執筆の上限
+    confirmed: list[dict]     # 出典と一致して検証済みになった数値（書き換え禁止）
+    fetched_urls: list[str]   # 本文取得を試みたURL（再試行の抑制に使う）
 
 
 def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
@@ -69,4 +71,6 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "queries_done": [],
         "compose_count": 0,
         "max_composes": max_composes,
+        "confirmed": [],
+        "fetched_urls": [],
     }

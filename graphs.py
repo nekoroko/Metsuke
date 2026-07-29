@@ -35,10 +35,21 @@ SETTING_KEY = "default_graph_kind"
 # ステートマシンは1ラウンドで search / digest と2ノード進むため、
 # ReActと同じ step 予算（10）では correct / critic が「差し戻す予算がない」
 # と判断してレビューを飛ばしてしまう。工程数に合わせて広げる。
+# critic の指摘を反映するには compose 枠が1つ要る。critic 予算が compose 予算と
+# 同数だと、最後の指摘が必ず反映されないまま終わる（実測で毎回発生していた）。
+# 不変条件: max_critiques <= max_composes - 1
 KIND_BUDGETS = {
     REACT: {},
-    RESEARCH: {"max_steps": 18, "max_rounds": 3, "max_composes": 3},
+    RESEARCH: {"max_steps": 18, "max_rounds": 3, "max_composes": 3, "max_critiques": 2},
 }
+
+
+def _enforce_budget_invariant(budgets: dict) -> dict:
+    out = dict(budgets)
+    composes = out.get("max_composes")
+    if composes is not None:
+        out["max_critiques"] = min(out.get("max_critiques", 2), max(1, composes - 1))
+    return out
 
 
 def normalize_kind(kind: str) -> str:
@@ -119,4 +130,5 @@ def log_title(graph_kind: str = None, trace=None) -> str:
 def make_state(kind: str, task_prompt: str):
     """グラフに合わせた予算で初期状態を作る。"""
     from state import make_initial_state
-    return make_initial_state(task_prompt, **KIND_BUDGETS.get(normalize_kind(kind), {}))
+    budgets = _enforce_budget_invariant(KIND_BUDGETS.get(normalize_kind(kind), {}))
+    return make_initial_state(task_prompt, **budgets)

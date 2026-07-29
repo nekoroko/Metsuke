@@ -88,14 +88,14 @@ class TestPlanStep(unittest.TestCase):
 
     def test_parses_numbered_lines(self):
         gr._ask = lambda *a, **k: (
-            "1. 直近四半期の営業利益 | SKハイニックス 決算 実績\n"
-            "2. 直近1週間の株価 | SKハイニックス 株価\n"
+            "1. 直近の人口 | 東京 人口 推計\n"
+            "2. 前年からの増減 | 東京 人口 増減\n"
         )
         # 決算・株価タスクは reinforce_plan が項目を足すため、
         # ここでは補強の対象にならないタスクでパースだけを見る
         out = gr.plan_step(_state(task="東京の人口推計"))
         self.assertEqual(len(out["plan_items"]), 2)
-        self.assertEqual(out["plan_items"][0]["query"], "SKハイニックス 決算 実績")
+        self.assertEqual(out["plan_items"][0]["query"], "東京 人口 推計")
         self.assertEqual(out["plan_items"][0]["status"], "open")
         self.assertEqual(out["trace"][-1]["next"], "search")
 
@@ -431,3 +431,118 @@ class TestResultRecheck(unittest.TestCase):
         finally:
             gr._ask = orig
         self.assertEqual(gr.route_after_gap(out), "compose")
+
+
+class TestQueryRegeneration(unittest.TestCase):
+    """gap は未充足の項目に必ず未使用のクエリを与える"""
+
+    def setUp(self):
+        self._orig = gr._ask
+
+    def tearDown(self):
+        gr._ask = self._orig
+
+    def test_重複クエリなら別の切り口に差し替える(self):
+        gr._ask = lambda *a, **k: "ITEM 1: NG | SKハイニックス 決算"
+        s = _state(plan_items=[{"id": 1, "question": "決算の実績", "query": "SKハイニックス 決算",
+                                "status": "open", "hits": []}],
+                   queries_done=["SKハイニックス 決算"])
+        out = gr.gap_step(s)
+        new_query = out["plan_items"][0]["query"]
+        self.assertFalse(gr.is_duplicate_query(new_query, s["queries_done"]))
+        self.assertEqual(gr.route_after_gap(out), "search")
+
+    def test_クエリを返さなくても新しいクエリを作る(self):
+        gr._ask = lambda *a, **k: "ITEM 1: NG"
+        s = _state(plan_items=[{"id": 1, "question": "決算の実績", "query": "SKハイニックス 決算",
+                                "status": "open", "hits": []}],
+                   queries_done=["SKハイニックス 決算"])
+        out = gr.gap_step(s)
+        self.assertTrue(out["plan_items"][0]["query"])
+        self.assertFalse(gr.is_duplicate_query(out["plan_items"][0]["query"],
+                                               s["queries_done"]))
+
+    def test_切り口が尽きても重複を返さない(self):
+        done = [f"SKハイニックス {a}" for a in gr.QUERY_ANGLES]
+        q = gr.fresh_query("SKハイニックスの決算", "直近の営業利益", done)
+        self.assertFalse(gr.is_duplicate_query(q, done))
+
+
+class TestIrrelevantQuery(unittest.TestCase):
+    """タスクと無関係なクエリを plan の時点で是正する"""
+
+    def test_無関係なクエリは作り直す(self):
+        items = [{"id": 1, "question": "市場動向", "query": "バッテリー市場 動向",
+                  "status": "open", "hits": []}]
+        out = gr.drop_irrelevant_queries("SKハイニックスの決算と株価", items)
+        self.assertIn("SKハイニックス", out[0]["query"])
+        self.assertEqual(out[0]["repaired_from"], "バッテリー市場 動向")
+
+    def test_関連するクエリはそのまま(self):
+        items = [{"id": 1, "question": "決算", "query": "SKハイニックス 決算 実績",
+                  "status": "open", "hits": []}]
+        out = gr.drop_irrelevant_queries("SKハイニックスの決算と株価", items)
+        self.assertEqual(out[0]["query"], "SKハイニックス 決算 実績")
+        self.assertNotIn("repaired_from", out[0])
+
+    def test_分かち書きされない日本語でも主語を取れる(self):
+        self.assertEqual(gr._subject("SKハイニックスの直近の決算と株価を調べて"), "SKハイニックス")
+        self.assertEqual(gr._subject("TSMCの決算"), "TSMC")
+
+
+class TestComposeBudgetOrdering(unittest.TestCase):
+    """critic の指摘は、compose 枠が無ければ注記に回す"""
+
+    def setUp(self):
+        self._orig_dispatch = gr.critic_step
+
+    def tearDown(self):
+        gr.critic_step = self._orig_dispatch
+
+    def _critic_says_revise(self, state):
+        return {**state,
+                "history": state["history"] + [{"role": "result", "content": "指摘: 時点が無い"}],
+                "status": "running",
+                "critique_count": state.get("critique_count", 0) + 1,
+                "trace": (state.get("trace") or []) + [
+                    {"seq": 1, "node": "critic", "next": "react", "summary": "要修正",
+                     "note": "", "skipped": False}]}
+
+    def test_枠が残っていれば差し戻す(self):
+        gr.critic_step = self._critic_says_revise
+        out = gr.critic_sm_step(_state(compose_count=1, max_composes=3))
+        self.assertEqual(gr.route_after_critic(out), "compose")
+
+    def test_枠が無ければ注記にして終える(self):
+        gr.critic_step = self._critic_says_revise
+        out = gr.critic_sm_step(_state(compose_count=3, max_composes=3))
+        self.assertEqual(out["status"], "done")
+        self.assertTrue(any("レビュー未反映" in n for n in out["verification_notes"]))
+        self.assertEqual(out["trace"][-1]["next"], "END")
+
+    def test_予算の不変条件(self):
+        s = graphs.make_state(graphs.RESEARCH, "t")
+        self.assertLessEqual(s["max_critiques"], s["max_composes"] - 1)
+
+
+class TestConfirmedInCompose(unittest.TestCase):
+    """確定済みフィールドは compose のプロンプトに載る"""
+
+    def setUp(self):
+        self._orig = gr._ask
+
+    def tearDown(self):
+        gr._ask = self._orig
+
+    def test_確定済みが渡り変更に理由を求める(self):
+        seen = {}
+
+        def capture(prompt, **k):
+            seen["prompt"] = prompt
+            return "DONE: 書きました。"
+        gr._ask = capture
+        gr.compose_step(_state(confirmed=[
+            {"raw": "22.3兆ウォン", "label": "売上高", "value_type": "actual"}]))
+        self.assertIn("確定済み", seen["prompt"])
+        self.assertIn("22.3兆ウォン", seen["prompt"])
+        self.assertIn("理由を1行で", seen["prompt"])

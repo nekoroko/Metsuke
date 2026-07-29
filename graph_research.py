@@ -26,6 +26,7 @@ from state import AgentState
 from tools import web_search, fetch_url
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
+    format_confirmed,
 )
 from graph import (
     _with_trace, correct_step, critic_step, SECTIONS_ALWAYS, SECTIONS_WRITE,
@@ -127,9 +128,58 @@ _HAS_ACTUAL_QUERY = ("実績", "結果", "発表", "速報")
 _HAS_SERIES_QUERY = ("推移", "時系列", "チャート")
 
 
+# 主語になりうる語のかたまり。英数字（SK, TSMC）・カタカナ（ハイニックス）・
+# 漢字2〜4字（半導体）を拾い、隣接するものは1語に繋ぐ（SK+ハイニックス）。
+_SUBJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]*|[ァ-ヶー]{2,}|[一-龥]{2,4}")
+
+
 def _subject(task: str) -> str:
-    """タスク文から検索の主語になりそうな語を取り出す。"""
-    return " ".join(_keywords(task)[:2])
+    """
+    タスク文から検索の主語になりそうな語を取り出す。
+
+    日本語のタスクは分かち書きされないため、空白分割だけでは
+    「SKハイニックスの直近の決算と株価を調べて」が丸ごと1語になり、
+    そのままクエリにすると検索が壊れる。
+    """
+    words = _keywords(task)
+    if len(words) >= 2:
+        return " ".join(words[:2])
+
+    matches = list(_SUBJECT_RE.finditer(task or ""))
+    if not matches:
+        return (task or "")[:12]
+    merged, start, end = [], None, None
+    for m in matches:
+        if start is not None and m.start() == end:
+            end = m.end()
+            continue
+        if start is not None:
+            merged.append(task[start:end])
+        start, end = m.start(), m.end()
+    if start is not None:
+        merged.append(task[start:end])
+    merged = [w for w in merged if len(w) >= 2]
+    return merged[0] if merged else (task or "")[:12]
+
+
+def query_relevant(task: str, query: str) -> bool:
+    """
+    クエリがタスクと繋がっているか。
+
+    語の一致は部分一致で見る。日本語は分かち書きされないため、
+    完全一致を要求すると正しいクエリまで無関係と判定してしまう。
+    """
+    words = [w for w in _keywords(query) if len(w) >= 2]
+    if not words:
+        return True
+    task_words = [w for w in _keywords(task) if len(w) >= 2]
+    task_words.append(_subject(task))
+    for w in words:
+        if w in (task or ""):
+            return True
+        if any(w in tw or tw in w for tw in task_words if tw):
+            return True
+    return False
 
 
 def reinforce_plan(task: str, items: list[dict]) -> list[dict]:
@@ -176,6 +226,58 @@ def needs_result_recheck(state: dict) -> bool:
         return False
     done = " ".join(state.get("queries_done", []))
     return not any(w in done for w in ("結果", "実績", "速報"))
+
+
+QUERY_ANGLES = ("結果", "実績", "速報", "発表後 反応", "推移", "見通し")
+
+
+def fresh_query(base: str, question: str, queries_done: list) -> str:
+    """
+    まだ使っていない切り口を足した新しいクエリを作る。
+
+    gap が「未充足」と判断しても、同じクエリしか出せなければ search は
+    素通りする（実測で発生）。切り口を変えたクエリを必ず1つ用意する。
+    """
+    done = list(queries_done or [])
+    subject = " ".join(_keywords(base or question)[:2]) or (base or question)[:20]
+    for angle in QUERY_ANGLES:
+        candidate = f"{subject} {angle}".strip()
+        if not any(_normalize_query(candidate) == _normalize_query(q) for q in done):
+            return candidate
+    # 切り口を使い切ったら、問いの語を足して重複を外す
+    extra = " ".join(_keywords(question)[:2])
+    return f"{subject} {extra}".strip()
+
+
+def _normalize_query(q: str) -> str:
+    return " ".join(sorted((q or "").lower().split()))
+
+
+def is_duplicate_query(query: str, queries_done: list) -> bool:
+    norm = _normalize_query(query)
+    return any(norm == _normalize_query(q) for q in (queries_done or []))
+
+
+def drop_irrelevant_queries(task: str, items: list[dict]) -> list[dict]:
+    """
+    タスクと語がひとつも重ならないクエリを、タスク寄りに作り直す。
+
+    実測で、半導体企業の調査に「バッテリー市場動向」のような無関係な
+    クエリが紛れ込んでいた。plan の出力時点で弾く。
+    """
+    subject = _subject(task)
+    if not subject:
+        return items
+    out = []
+    for item in items:
+        if query_relevant(task, item.get("query", "")):
+            out.append(item)
+            continue
+        repaired = dict(item)
+        repaired["query"] = f"{subject} {' '.join(_keywords(item.get('question', ''))[:1])}".strip()
+        repaired["repaired_from"] = item.get("query", "")
+        out.append(repaired)
+    return out
 
 
 def append_result_item(task: str, items: list[dict]) -> list[dict]:
@@ -297,12 +399,18 @@ def plan_step(state: AgentState) -> AgentState:
                   "query": " ".join(_keywords(state["task"])[:3]) or state["task"][:40],
                   "status": "open", "hits": []}]
 
-    items = reinforce_plan(state["task"], items)
+    items = drop_irrelevant_queries(state["task"], reinforce_plan(state["task"], items))
+    repaired = [i for i in items if i.get("repaired_from")]
 
     plan_text = "調査計画:\n" + "\n".join(
         f"{i['id']}. {i['question']}（クエリ: {i['query']}）" for i in items
     )
     note = "LLMが計画を返さなかったためタスクをそのまま調査する" if fallback else ""
+    if repaired:
+        note = (note + " / " if note else "") + (
+            "タスクと無関係なクエリを是正: "
+            + "、".join(i["repaired_from"] for i in repaired[:2])
+        )
     if err:
         note = f"計画の生成に失敗（{err}）。タスクをそのまま調査する"
 
@@ -504,6 +612,7 @@ def gap_step(state: AgentState) -> AgentState:
                            note="判定不能のため執筆へ進む", skipped=True)
 
     still_open = 0
+    queries_done = state.get("queries_done", [])
     for item in items:
         verdict, next_query = verdicts.get(item["id"], ("OK", ""))
         if verdict == "OK":
@@ -511,8 +620,12 @@ def gap_step(state: AgentState) -> AgentState:
             continue
         item["status"] = "open"
         still_open += 1
-        if next_query:
-            item["query"] = next_query[:80]
+        candidate = (next_query or "")[:80].strip()
+        # 未使用のクエリを必ず1つ持たせる。使い回しだと search が素通りして
+        # 「未充足のまま何も起きない」ラウンドになる
+        if not candidate or is_duplicate_query(candidate, queries_done):
+            candidate = fresh_query(state["task"], item.get("question", ""), queries_done)
+        item["query"] = candidate
 
     if still_open == 0:
         return _with_trace(state, {**state, "plan_items": items, "research_round": rnd},
@@ -542,6 +655,8 @@ def compose_step(state: AgentState) -> AgentState:
     warnings = pending_event_warnings(state.get("findings", []))
     warn_text = ("\n".join(f"- {w}" for w in warnings) + "\n") if warnings else ""
 
+    confirmed_text = format_confirmed(state.get("confirmed", []))
+
     prompt = (
         f"今日は{today}です。\n"
         f"タスク: {state['task']}\n\n"
@@ -551,10 +666,15 @@ def compose_step(state: AgentState) -> AgentState:
         + "\n\n"
         + _sources_section(state.get("sources", []))
         + (f"\n## 注意\n{warn_text}" if warn_text else "")
+        + (f"\n## 確定済み（検証済み。値もラベルも変えないこと）\n{confirmed_text}\n"
+           if confirmed_text else "")
         + _recent_feedback(state["history"])
         + "\n上の情報だけを使って、タスクへの回答を書いてください。\n"
         "上に無い数値・固有名詞・因果関係を書かないこと。\n"
-        "情報が足りない項目は、埋めずに「確認できず」と書くこと。\n"
+        "数値一覧の [実績] / [予想] は、そのまま同じ表記で書き写すこと。\n"
+        + ("確定済みの値を落としたり書き換えたりする場合は、理由を1行で書くこと。\n"
+           if confirmed_text else "")
+        + "情報が足りない項目は、埋めずに「確認できず」と書くこと。\n"
         "回答は必ず 'DONE: ' から始めてください。\n"
     )
 
@@ -608,7 +728,42 @@ def correct_sm_step(state: AgentState) -> AgentState:
 
 
 def critic_sm_step(state: AgentState) -> AgentState:
-    return _relabel_next(critic_step(state), {"react": "compose"})
+    """
+    graph.py の critic を使い、遷移先をステートマシン側に読み替える。
+
+    加えて、compose 枠が残っていないのに差し戻そうとする場合は、
+    指摘を verification_notes に移して終える。枠が無いまま react/compose へ
+    戻しても、compose_step が上限で素通りして指摘が消えるだけになる。
+    """
+    out = _relabel_next(critic_step(state), {"react": "compose"})
+    if out.get("status") != "running":
+        return out
+
+    if state.get("compose_count", 0) < state.get("max_composes", 3):
+        return out
+
+    issues = []
+    for entry in out.get("history", [])[len(state.get("history", [])):]:
+        if entry.get("role") == "result":
+            issues.append(entry.get("content", "")[:400])
+    fixed = {
+        **out,
+        "history": state["history"],          # 差し戻し文は履歴に残さない
+        "status": "done",
+        "verification_notes": state.get("verification_notes", [])
+        + [f"（レビュー未反映）{i}" for i in issues],
+    }
+    trace = list(out.get("trace") or [])
+    if trace:
+        last = dict(trace[-1])
+        last.update({
+            "next": "END",
+            "summary": "レビュー: 要修正だが執筆枠が残っていない",
+            "note": "指摘を最終回答の注記に回す",
+        })
+        trace[-1] = last
+    fixed["trace"] = trace
+    return fixed
 
 
 # ===== 遷移 =====

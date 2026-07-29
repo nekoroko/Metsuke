@@ -7,6 +7,7 @@ from numeric import (
     extract_numbers, find_conversion_pairs, conversion_plausible, matches_any,
     format_findings, forecast_marked_as_actual, untagged_ratio,
     dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
+    label_value_mismatches, candidates_for, tag_conflicts,
 )
 
 
@@ -89,8 +90,14 @@ FACT_CHECKER_PROMPT = (
     "  どこにあるかを示すこと（例:「Step 4 の検索結果にある」）。\n"
     "  在り処を示せば、エージェントは再検索せず読み直しで直せる。\n"
     "- 誤りの削除を求めるときは、正しい値への置き換えまで指示すること。\n"
-    "  削除だけを指示すると、正しい情報ごと消えて回答が痩せる。\n"
-    "  置き換える値が履歴に無い場合は、そう明記すること。\n"
+    "  「この記述は不正確です。削除するか、次の正しい値に置き換えてください: ◯◯」\n"
+    "  という形にすること。削除だけの指示は禁止。置き換える値が履歴に無い\n"
+    "  場合は「置き換えられる値は履歴にありません」と明記すること。\n"
+    "- **文章の構成・トーン・見出しの型・章の並びに口を出さないこと。**\n"
+    "  レビュアーの仕事は事実と出典の整合性の検証だけである。\n"
+    "- 「懸念点と好材料を対比させて」のような書き方の指示は、\n"
+    "  **その両方が実際に検索結果に存在する場合に限る**。\n"
+    "  片方しか無いなら、無い側を書かせないこと。\n"
     "\n"
     "## 回答形式\n"
     "VERDICT: OK または NEEDS_REVISION\n"
@@ -406,11 +413,40 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
     candidates = _history_numbers(history, sources)
     for n in extract_numbers(output or ""):
         if not matches_any(n, candidates):
+            hints = candidates_for(n, findings or [])
+            suggestion = (
+                f"次の値に置き換えてください: {'、'.join(hints)}" if hints
+                else "置き換えられる値は取得済みの情報にありません。削除してください"
+            )
             issues.append(
                 f"「{n['raw']}」は検索結果・出典のどこにも見当たりません。"
-                f"出典の数値をそのまま書き写すか、この数値を削除してください"
-                f"（該当箇所: …{n['context']}…）。"
+                f"{suggestion}（該当箇所: …{n['context']}…）。"
             )
+
+    source_text = " ".join(
+        [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+        + [f.get("context", "") for f in (findings or [])]
+    )
+    for m in label_value_mismatches(output or "", findings or [], source_text):
+        if m["reason"] == "value":
+            issues.append(
+                f"「{m['label']}」の値が出典と違います。回答は「{m['raw']}」ですが、"
+                f"出典で「{m['label']}」に対応するのは {'、'.join(m['expected'])} です。"
+                f"出典の値に置き換えてください。"
+            )
+        else:
+            issues.append(
+                f"「{m['raw']}」を「{m['label']}」として書いていますが、出典では"
+                f"{'、'.join(m['expected'])} に付いている値です"
+                f"（出典: …{m['context'][:50]}…）。"
+                f"ラベルの対応を出典どおりに直すか、この記述を削除してください。"
+            )
+
+    for t in tag_conflicts(output or "", findings or []):
+        issues.append(
+            f"「{t['raw']}」の種別タグが出典と違います。回答は {t['written']} ですが、"
+            f"出典の文脈は {t['expected']} です（出典: …{t['context'][:50]}…）。"
+        )
 
     for m in forecast_marked_as_actual(output or "", findings or []):
         issues.append(
