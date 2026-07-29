@@ -265,7 +265,16 @@ class TestComposeStep(unittest.TestCase):
         gr._ask = lambda *a, **k: "   "
         out = gr.compose_step(_state())
         self.assertEqual(gr.route_after_compose(out), "compose")
-        self.assertEqual(out["compose_count"], 1)
+        # 空応答は差し戻しとは別枠で数える（compose_count を食わない）
+        self.assertEqual(out["compose_retry_count"], 1)
+        self.assertEqual(out["compose_count"], 0)
+
+    def test_empty_response_gives_up_at_retry_limit(self):
+        gr._ask = lambda *a, **k: "   "
+        out = gr.compose_step(_state(compose_retry_count=1, max_compose_retries=1))
+        self.assertEqual(gr.route_after_compose(out), "correct")
+        self.assertEqual(out["compose_count"], 0)
+        self.assertTrue(any("空応答" in n for n in out["verification_notes"]))
 
     def test_stops_at_compose_limit(self):
         gr._ask = lambda *a, **k: self.fail("上限到達時はLLMを呼ばない")
@@ -615,3 +624,76 @@ class TestConfirmedRestoration(unittest.TestCase):
         self.assertIn("検証済みだが本文に反映されなかった値", done)
         self.assertIn("-14.65%", done)
         self.assertTrue(any("補記" in n for n in out["verification_notes"]))
+
+
+class TestBudgetInvariantGenerality(unittest.TestCase):
+    """
+    compose 枠の式が、今回のログだけを救う特殊解ではないことを確かめる。
+
+    compose_count を増やす経路をコードから数え上げ、その最悪ケースを
+    総当たりで検証する。経路が増えたらこのテストが落ちるようにしてある。
+    """
+
+    CONSUMERS = ("初稿", "correctの差し戻し", "criticの差し戻し")
+
+    def test_compose_countを増やす箇所が増えていない(self):
+        """
+        枠を消費するのは「執筆が成立した1回」と「LLM例外で終了する1回」だけ。
+        後者は END へ抜けるので差し戻し予算とは競合しない。
+        新しい消費経路が足されたら、この件数が変わって落ちる。
+        """
+        import inspect
+        src = inspect.getsource(gr)
+        writes = [line.strip() for line in src.splitlines()
+                  if '"compose_count":' in line and "state.get" not in line]
+        self.assertEqual(len(writes), 2, f"compose_count の更新箇所が増えている: {writes}")
+        self.assertTrue(all("composed + 1" in w for w in writes))
+
+    def test_例外での消費は終了するので競合しない(self):
+        orig = gr._ask
+
+        def boom(*a, **k):
+            raise RuntimeError("接続断")
+        gr._ask = boom
+        try:
+            out = gr.compose_step(_state())
+        finally:
+            gr._ask = orig
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(gr.route_after_compose(out), gr.END)
+
+    def test_最悪ケースでも枠が足りる(self):
+        for corrections in range(0, 4):
+            for critiques in range(0, 4):
+                need = graphs.required_composes(corrections, critiques)
+                budgets = graphs._enforce_budget_invariant({
+                    "max_corrections": corrections, "max_critiques": critiques})
+                used = 1 + corrections + critiques      # 初稿 + 両方が上限まで差し戻す
+                self.assertGreaterEqual(
+                    budgets["max_composes"], used,
+                    f"corrections={corrections}, critiques={critiques} で枠が足りない")
+                self.assertEqual(need, used)
+
+    def test_空応答は枠を食わない(self):
+        # 空応答は compose_retry_count で数えるため、上の式に影響しない
+        s = graphs.make_state(graphs.RESEARCH, "t")
+        self.assertGreaterEqual(s["max_compose_retries"], 1)
+        self.assertEqual(s["compose_retry_count"], 0)
+
+    def test_指摘件数は枠を増やさない(self):
+        # 1回の差し戻しで何件指摘しても、消費する枠は1つ
+        import graph
+        from state import make_initial_state
+        from numeric import collect_from_text
+        state = make_initial_state("決算", max_composes=5, max_corrections=2,
+                                   reserve_compose_for_critic=1)
+        state["findings"] = collect_from_text("売上高は22.3兆ウォン", source="s")
+        state["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォン"},
+            {"role": "assistant",
+             "content": "DONE: 利益率は99.9% [実績]、成長率は88.8% [実績]、粗利は77.7% [実績]。"},
+        ]
+        out = graph.correct_step(state)
+        feedback = out["history"][-1]["content"]
+        self.assertGreaterEqual(feedback.count("見当たりません"), 3)   # 指摘は3件
+        self.assertEqual(out["compose_count"], 0)                      # 枠の消費は執筆側で1回だけ

@@ -9,6 +9,7 @@ from numeric import (
     dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
     label_value_mismatches, candidates_for, tag_conflicts,
     appears_verbatim, labeled_values, primary_label, TRUNCATION_MARK,
+    candidate_suggestion,
 )
 
 
@@ -426,11 +427,20 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
         # 抽出は完璧ではない。原文にその表記がそのまま出ているなら、
         # 「出典に無い」と断じない（実測で、原文にある売上高が却下された）
         if not matches_any(n, candidates) and not appears_verbatim(n["raw"], source_texts):
-            hints = candidates_for(n, findings or [], label=answer_labels.get(n["raw"], ""))
-            suggestion = (
-                f"次の値に置き換えてください: {'、'.join(hints)}" if hints
-                else "置き換えられる値は取得済みの情報にありません。削除してください"
-            )
+            label = answer_labels.get(n["raw"], "")
+            kind, hints = candidate_suggestion(n, findings or [], label=label)
+            if kind == "labeled":
+                suggestion = (f"【置換候補】{'、'.join(hints)}"
+                              f"（出典で「{label}」に付いている値）に置き換えてください")
+            elif kind == "unlabeled":
+                suggestion = (f"【候補（参考）】{'、'.join(hints)}"
+                              "。単位と桁が近いだけで、同じ項目の値とは限りません")
+            else:
+                suggestion = (
+                    "【置換候補なし】"
+                    + (f"出典に「{label}」の値は見当たりません。" if label else "")
+                    + "削除するか、出典を取り直してください"
+                )
             trunc_note = (
                 "（出典の本文が途中で切れています。切れた先に書かれている可能性があります）"
                 if truncated else ""

@@ -622,12 +622,36 @@ _HANGUL = re.compile(r"[\uac00-\ud7a3]")
 _PROSE_MARKERS = ("は", "が", "の", "を", "に", "で", "と", " ", "　", "、", "。")
 
 
-def looks_tabular(context: str, window: int = 14) -> bool:
-    """数値の周りが、区切りの無いフィールドの羅列になっているか。"""
+# 表とみなす条件のしきい値。助詞が無いだけを条件にすると、
+# 「純利益9.2兆ウォン」「前年同期比650%増」のような見出し風の短い断片まで
+# 表と判定してしまい、隣接順序の判定が自然文へ及ぶ。
+# 実際の表のなれの果ては、長く、数字が数珠つなぎに並んでいる。
+TABULAR_MIN_CHARS = 25
+TABULAR_MIN_DIGIT_RUNS = 3
+# 助詞・空白の密度がこれ未満なら「文章ではない」とみなす。ゼロを要求すると、
+# 実際の表（「時価総額97,146,675,000千 KRW」のように空白が1つ混じる）が
+# 弾かれてしまう。
+
+TABULAR_MAX_PROSE_DENSITY = 0.02
+
+_DIGIT_RUN = re.compile(r"\d[\d,.]*")
+
+
+def looks_tabular(context: str) -> bool:
+    """
+    数値の周りが、区切りの無いフィールドの羅列になっているか。
+
+    条件は3つ。ある程度の長さがあること、助詞・空白がほとんど無いこと、
+    数字の並びが3つ以上あること。単位の付いた数値ではなく数字の並びで
+    数えるのは、株数や売買代金のように単位が離れている欄があるため。
+    """
     text = (context or "")
-    if not text:
+    if len(text) < TABULAR_MIN_CHARS:
         return False
-    return not any(m in text for m in _PROSE_MARKERS)
+    markers = sum(text.count(m) for m in _PROSE_MARKERS)
+    if markers / len(text) >= TABULAR_MAX_PROSE_DENSITY:
+        return False
+    return len(_DIGIT_RUN.findall(text)) >= TABULAR_MIN_DIGIT_RUNS
 
 
 def _comparable_labels(a: str, b: str) -> bool:
@@ -865,6 +889,39 @@ def candidates_for(entry: dict, findings: list, limit: int = 3,
         else:
             same_scale.append(f["raw"])
     return (same_label + same_scale)[:limit]
+
+
+def candidate_suggestion(entry: dict, findings: list, label: str = "",
+                         limit: int = 3) -> tuple:
+    """
+    置換候補を、確度つきで返す。戻り値は (種別, 値のリスト)。
+
+      "labeled"   同じ項目名の値が見つかった。そのまま置き換えられる
+      "unlabeled" 項目名が取れないので、単位と桁だけで拾った参考値
+      "none"      候補なし
+
+    項目名が分かっているのに同じ項目名の値が無い場合、単位と桁が近いだけの
+    値を候補として並べない。実測（doc26）で、営業利益の置換候補に
+    「世界のメモリ市場規模1,500兆ウォン」が並んでいた。桁の帯だけでは、
+    別の対象の値を弾けない。
+    """
+    if label:
+        labeled = candidates_for(entry, findings, limit=limit, label=label)
+        matched = [c for c in labeled
+                   if any(label == l or label in l or l in label
+                          for lv in labeled_values(_context_of(c, findings))
+                          if _normalize_digits(lv["raw"]) == _normalize_digits(c)
+                          for l in _labels_of(lv))]
+        return ("labeled", matched[:limit]) if matched else ("none", [])
+    hints = candidates_for(entry, findings, limit=limit)
+    return ("unlabeled", hints) if hints else ("none", [])
+
+
+def _context_of(raw: str, findings: list) -> str:
+    for f in findings or []:
+        if f.get("raw") == raw:
+            return f.get("context", "")
+    return ""
 
 
 def tag_conflicts(answer: str, findings: list) -> list[dict]:

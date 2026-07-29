@@ -218,8 +218,8 @@ class TestCorrectNode(unittest.TestCase):
                 )
         out = self.graph.correct_step(self.state)
         feedback = out["history"][-1]["content"]
-        self.assertIn("取得済みの数値", feedback)
-        self.assertIn("置き換えに使うこと", feedback)
+        self.assertIn("【参考リスト】", feedback)
+        self.assertIn("これは候補ではありません", feedback)
 
     def test_差し戻し上限で素通しする(self):
         self.state["correction_count"] = 2
@@ -818,8 +818,9 @@ class TestLabelValueMatching(unittest.TestCase):
         from reviewers import numeric_checker
         self.checker = numeric_checker
         # 区切りの無い株価データ。ラベルは値の後ろに来る
-        # 実際の株価ページは、配当利回りも同じ表に並んでいる
-        self.raw = "配当利回り--41.74億売買代金0.55%売買回転率"
+        # 実物の形（区切りの消えた表）を使う。短く切り詰めたサンプルだと
+        # 「表かどうか」の判定境界に載らず、検出経路が変わってしまう
+        self.raw = _noisy("stock_table_concat")["raw"]
         self.findings = [{"kind": "number", "raw": "0.55%",
                           "context": self.raw, "value_type": "unknown"}]
 
@@ -1156,3 +1157,112 @@ class TestCandidateFiltering(unittest.TestCase):
         entry = self.numeric.extract_numbers("9.9兆ウォン")[0]
         cands = self.numeric.candidates_for(entry, self.led, label="営業利益")
         self.assertEqual(cands[0], "9.2兆ウォン")
+
+
+class TestTabularBoundary(unittest.TestCase):
+    """
+    表形式の判定境界。自然文に隣接順序のロジックが及ばないことを確かめる。
+
+    「助詞が無い」だけを条件にすると、見出し風の短い断片まで表と判定され、
+    自然文での誤爆が再発する。
+    """
+
+    PROSE = [
+        "営業利益は9.2兆ウォンだった",
+        "SKハイニックスの第2四半期の営業利益は前年同期比で約650%増加した",
+        "28日の終値は前日比-14.65%となり、時価総額は97兆ウォンに減少した",
+        "第2四半期の売上高は52兆5,763億ウォンで、四半期として過去最高となった",
+        "2026年7月29日発表9.2兆ウォン",
+        "売上高22.3兆ウォン営業利益9.2兆ウォン",
+        "ROE18.5%PER8.42PBR1.95",
+        "前年同期比650%増",
+        "純利益9.2兆ウォン",
+        "株価-14.65%",
+    ]
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+
+    def test_自然文は表と判定しない(self):
+        for text in self.PROSE:
+            self.assertFalse(self.numeric.looks_tabular(text), f"表と誤判定: {text}")
+
+    def test_実物の表は表と判定する(self):
+        self.assertTrue(self.numeric.looks_tabular(_noisy("stock_table_concat")["raw"]))
+
+    def test_空白が混ざっても表と判定する(self):
+        # 「時価総額97,146,675,000千 KRW」のように空白が1つ入るのは実際にある
+        raw = _noisy("stock_table_concat")["raw"]
+        self.assertIn(" ", raw)
+
+    def test_自然文で言い換えラベルを誤検出しない(self):
+        for text in self.PROSE:
+            led = self.numeric.collect_from_text(text, source="web_search(x)")
+            nums = self.numeric.extract_numbers(text)
+            if not nums:
+                continue
+            r = self.checker(output=f"当期の指標は{nums[0]['raw']} [実績] です。",
+                             history=[{"role": "result", "content": text}], findings=led)
+            self.assertNotIn("ラベルの対応", " ".join(r["issues"]),
+                             f"自然文で付け替え扱いされた: {text}")
+
+
+class TestSuggestionFormatting(unittest.TestCase):
+    """置換候補と参考リストが、読んで見分けられる形式になっているか"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        self.checker = numeric_checker
+
+    def test_同じ項目名の値だけを置換候補にする(self):
+        import numeric
+        led = numeric.collect_from_text("営業利益は9.2兆ウォン。売上高は22.3兆ウォン。",
+                                        source="web_search(x)")
+        r = self.checker(output="営業利益は9.9兆ウォン [実績] でした。",
+                         history=[{"role": "result", "content": "営業利益は9.2兆ウォン。"}],
+                         findings=led)
+        joined = " ".join(r["issues"])
+        self.assertIn("【置換候補】9.2兆ウォン", joined)
+        self.assertNotIn("22.3兆ウォン", joined)
+
+    def test_項目名が違う値は候補に混ぜない(self):
+        # doc26: 営業利益の候補に「世界のメモリ市場規模1,500兆ウォン」が並んでいた
+        import numeric
+        led = numeric.collect_from_text(
+            "世界のメモリ市場規模は1,500兆ウォンに拡大する見通し。", source="web_search(x)")
+        r = self.checker(
+            output="営業利益は9.9兆ウォン [実績] でした。",
+            history=[{"role": "result", "content": "世界のメモリ市場規模は1,500兆ウォン。"}],
+            findings=led)
+        joined = " ".join(r["issues"])
+        self.assertNotIn("1,500兆ウォン", joined)
+        self.assertIn("【置換候補なし】", joined)
+
+    def test_候補が無いときも明示する(self):
+        r = self.checker(output="利益率は99.9% [実績] でした。",
+                         history=[{"role": "result", "content": "本文に数値なし"}])
+        self.assertIn("【置換候補なし】", " ".join(r["issues"]))
+
+    def test_台帳ダンプは参考リストとして別枠で出る(self):
+        import graph
+        from state import make_initial_state
+        from numeric import collect_from_text
+        state = make_initial_state("決算")
+        state["findings"] = collect_from_text(
+            "営業利益は9.2兆ウォン。株価は266,000ウォン。指数は0.55%。", source="web_search(x)")
+        state["history"] = [
+            {"role": "result", "content": "営業利益は9.2兆ウォン。"},
+            {"role": "assistant", "content": "DONE: 利益率は99.9% [実績] でした。"},
+        ]
+        state["step_count"] = 3
+        out = graph.correct_step(state)
+        feedback = out["history"][-1]["content"]
+        self.assertIn("【参考リスト】", feedback)
+        self.assertIn("これは候補ではありません", feedback)
+        # 参考リストは候補より後ろに置く
+        self.assertLess(feedback.index("【置換候補"), feedback.index("【参考リスト】"))

@@ -696,6 +696,20 @@ def compose_step(state: AgentState) -> AgentState:
         }, "compose", "執筆に失敗", "END", note=str(e)[:80])
 
     if not output.strip():
+        # 空応答の再試行は「差し戻し」とは別勘定にする。ここで compose_count を
+        # 使うと、correct と critic のために確保した枠を空応答が食い潰し、
+        # 予算の不変条件（1 + 訂正 + レビュー）が成り立たなくなる。
+        retries = state.get("compose_retry_count", 0)
+        if retries >= state.get("max_compose_retries", 1):
+            return _with_trace(state, {
+                **state,
+                "status": "needs_revision",     # 直前の版があれば correct が拾う
+                "compose_retry_count": retries + 1,
+                "step_count": state["step_count"] + 1,
+                "verification_notes": state.get("verification_notes", [])
+                + ["レポートの生成が空応答を繰り返したため、この版は書き直せていません。"],
+            }, "compose", "空応答が続いたため執筆を打ち切り", "correct",
+                note=f"再試行上限（{state.get('max_compose_retries', 1)}）", skipped=True)
         return _with_trace(state, {
             **state,
             "history": state["history"] + [{
@@ -703,9 +717,9 @@ def compose_step(state: AgentState) -> AgentState:
                 "content": "レポートの生成が空応答でした。もう一度書いてください。",
             }],
             "status": "running",
-            "compose_count": composed + 1,
+            "compose_retry_count": retries + 1,
             "step_count": state["step_count"] + 1,
-        }, "compose", "空応答", "compose", note="再執筆する")
+        }, "compose", "空応答", "compose", note=f"再執筆する（{retries + 1}回目）")
 
     text = output.strip()
     if "DONE:" not in text:

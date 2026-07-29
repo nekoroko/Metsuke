@@ -46,12 +46,31 @@ KIND_BUDGETS = {
 }
 
 
+def required_composes(max_corrections: int = 2, max_critiques: int = 2) -> int:
+    """
+    compose 枠の下限。
+
+    compose_count を増やすのは次の3つだけ。ここが増えたら式も直すこと。
+      1. gap → compose（初稿）             : 常に1回
+      2. correct → compose（数値の差し戻し）: 最大 max_corrections 回
+      3. critic  → compose（レビュー差し戻し）: 最大 max_critiques 回
+
+    空応答の再試行は compose_retry_count（別枠）で数える。同じ枠に入れると、
+    空応答が差し戻しの枠を食って、この式が成り立たなくなる。
+
+    correct / critic が「1回の差し戻しで複数の指摘を出す」ことは枠を増やさない
+    （指摘の件数ではなく、差し戻しの回数が枠を消費する）。
+    """
+    return 1 + max(0, max_corrections) + max(0, max_critiques)
+
+
 def _enforce_budget_invariant(budgets: dict) -> dict:
     """compose 枠を、初稿と2種類の差し戻しが全部収まる数に引き上げる。"""
     out = dict(budgets)
     if "max_critiques" not in out and "max_corrections" not in out:
         return out
-    needed = 1 + out.get("max_corrections", 2) + out.get("max_critiques", 2)
+    needed = required_composes(out.get("max_corrections", 2),
+                               out.get("max_critiques", 2))
     out["max_composes"] = max(out.get("max_composes", 0), needed)
     return out
 
