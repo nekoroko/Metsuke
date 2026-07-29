@@ -22,6 +22,7 @@
 # コード内の定数は、設定値が空/不正な場合の最終フォールバックに過ぎない。
 
 import os
+import re
 import time
 import random
 from langchain_openai import ChatOpenAI
@@ -375,6 +376,30 @@ def invoke_with_retry(llm, messages, max_retries: int = 3):
     raise last_error
 
 
+def salvage_from_reasoning(response) -> str:
+    """
+    本文（content）が空で、回答が思考側（reasoning_content）に入りきってしまった
+    場合に、そこから本文を回収する。
+
+    実測（gemma-4-e4b / LM Studio）で、コンテキスト8192に対しプロンプトが7160、
+    出力枠1032のうち1029がreasoningに消費され、content が空のまま
+    finish_reason='length' になるケースが発生した。このとき reasoning_content には
+    「ACTION: DONE / DONE: <完成したレポート>」がそのまま入っており、
+    回答自体は生成できているのに捨てていた。
+
+    Thinkingを無効化する設定を送っても、モデル・サーバーの実装によっては効かない。
+    そのため、抑制に失敗した場合の回収経路を用意しておく。
+    """
+    text = extract_reasoning_content_text(response)
+    if not text or not text.strip():
+        return ""
+    # 行頭の DONE: / ACTION: を見つけたら、そこから後ろを本文として扱う
+    m = re.search(r"^[ \t　]*(?:DONE:|ACTION:)", text, re.MULTILINE)
+    if m:
+        return text[m.start():]
+    return ""
+
+
 def invoke_with_continuation(llm, messages, max_continuations: int = 3):
     """
     LLM呼び出しを行い、finish_reason='length'（max_tokens到達で打ち切り）を検知したら、
@@ -459,6 +484,15 @@ def invoke_with_continuation(llm, messages, max_continuations: int = 3):
         full_content += piece
 
         finish_reason = extract_finish_reason(response)
+
+        # 本文が空のまま打ち切られた場合、思考側に回答が入っていないか確認する。
+        # 入っていれば継続リクエストを重ねずにそこで確定させる
+        # （継続しても同じことを繰り返し、枠を食い潰すだけになるため）。
+        if not full_content.strip():
+            salvaged = salvage_from_reasoning(response)
+            if salvaged:
+                full_content = salvaged
+                break
 
         if finish_reason != "length":
             break

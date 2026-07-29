@@ -190,18 +190,37 @@ def merge_findings(existing: list[dict], new: list[dict], limit: int = 40) -> li
     return merged[-limit:]
 
 
-def format_findings(findings: list[dict], max_items: int = 40) -> str:
-    """台帳をプロンプトへ埋め込む文字列にする"""
+# 台帳がプロンプトに占めてよい文字数の上限。
+# 台帳はトリミングされない領域なので、放っておくと際限なく伸びて
+# 回答を書くためのトークン枠を食い潰す。実測（コンテキスト8192）では
+# プロンプトが7160トークンまで膨らみ、出力枠が1032しか残らなかった。
+FINDINGS_CHAR_BUDGET = 1200
+
+
+def format_findings(findings: list[dict], max_items: int = 40,
+                    char_budget: int = FINDINGS_CHAR_BUDGET) -> str:
+    """
+    台帳をプロンプトへ埋め込む文字列にする。
+
+    新しいものほど関連性が高いので、新しい順に詰めて予算を使い切ったら止める。
+    表示は元の順序に戻す。
+    """
     if not findings:
         return ""
-    lines = []
-    for f in findings[-max_items:]:
+
+    picked = []
+    used = 0
+    for f in reversed(findings[-max_items:]):
         ctx = f.get("context", "")
-        if len(ctx) > 60:
-            ctx = ctx[:60] + "…"
+        if len(ctx) > 45:
+            ctx = ctx[:45] + "…"
         src = f.get("source", "")
-        lines.append(f"- {f['raw']}（{ctx}）" + (f" ／ {src}" if src else ""))
-    return "\n".join(lines)
+        line = f"- {f['raw']}（{ctx}）" + (f" ／ {src}" if src else "")
+        if used + len(line) > char_budget and picked:
+            break
+        picked.append(line)
+        used += len(line) + 1
+    return "\n".join(reversed(picked))
 
 
 # 「◯日に発表」等、予定を示す文脈を判定するための語

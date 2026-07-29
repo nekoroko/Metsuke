@@ -397,5 +397,125 @@ class TestExecutorHelpers(unittest.TestCase):
     def test_空文字には何も付けない(self):
         self.assertEqual(self.executor._stamp_result(""), "")
 
+
+def _stub_llm_modules():
+    import types
+    if "langchain_openai" not in sys.modules:
+        m = types.ModuleType("langchain_openai")
+        m.ChatOpenAI = object
+        sys.modules["langchain_openai"] = m
+    if "langgraph.graph" not in sys.modules:
+        lg = types.ModuleType("langgraph")
+        lgg = types.ModuleType("langgraph.graph")
+
+        class _SG:
+            def __init__(self, *a, **k): pass
+            def add_node(self, *a, **k): pass
+            def set_entry_point(self, *a, **k): pass
+            def add_conditional_edges(self, *a, **k): pass
+            def compile(self, *a, **k): return object()
+
+        lgg.StateGraph = _SG
+        lgg.END = "END"
+        sys.modules["langgraph"] = lg
+        sys.modules["langgraph.graph"] = lgg
+
+
+class TestReasoningSalvage(unittest.TestCase):
+    """
+    本文が空で、回答が思考側に入りきってしまったケースの回収。
+
+    実測（gemma-4-e4b / コンテキスト8192）で、プロンプト7160トークンに対し
+    出力枠が1032しか残らず、その1029がreasoningに消費されて content が空に
+    なった。reasoning_content には完成した DONE が入っていた。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import config
+        self.config = config
+
+    def _resp(self, reasoning):
+        return type("R", (), {
+            "content": "",
+            "additional_kwargs": {"reasoning_content": reasoning},
+        })()
+
+    def test_ACTION_DONEから回収する(self):
+        got = self.config.salvage_from_reasoning(
+            self._resp("検討中...\nACTION: DONE\nDONE: 本文です。"))
+        self.assertTrue(got.startswith("ACTION: DONE"))
+
+    def test_回収した内容がDONEとしてパースできる(self):
+        import graph
+        got = self.config.salvage_from_reasoning(
+            self._resp("検討中...\nACTION: DONE\nDONE: レポート本文。"))
+        act = graph.parse_action(got)
+        self.assertEqual(act["type"], "done")
+        self.assertEqual(act["content"], "レポート本文。")
+
+    def test_指示が無ければ回収しない(self):
+        # 単なる思考の断片を本文として採用してしまわないこと
+        got = self.config.salvage_from_reasoning(
+            self._resp("うーん、どう書こうか考えている。"))
+        self.assertEqual(got, "")
+
+    def test_思考が空なら回収しない(self):
+        self.assertEqual(self.config.salvage_from_reasoning(self._resp("")), "")
+
+
+class TestPromptBudget(unittest.TestCase):
+    """プロンプトが出力の枠を食い潰さないこと"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph
+        self.graph = graph
+
+    def test_局面ごとに不要な節を落とす(self):
+        early = self.graph.build_system_prompt(0, 10, False, None)
+        late = self.graph.build_system_prompt(8, 10, False, None)
+
+        self.assertIn("検索クエリの組み立て方", early)
+        self.assertNotIn("数値には出所と種別", early)
+
+        self.assertIn("数値には出所と種別", late)
+        self.assertNotIn("検索クエリの組み立て方", late)
+
+    def test_常設の節はどちらにもある(self):
+        for step in (0, 8):
+            p = self.graph.build_system_prompt(step, 10, False, None)
+            self.assertIn("## 回答形式", p)
+            self.assertIn("数値の書き写し", p)
+
+    def test_どの局面でも上限内に収まる(self):
+        # コンテキスト8192の環境で、履歴と回答の枠を残せる範囲に抑える
+        for step in (0, 5, 8, 9):
+            p = self.graph.build_system_prompt(step, 10, True, None)
+            self.assertLess(len(p), 4000, f"step={step} でプロンプトが大きすぎる: {len(p)}字")
+
+
+class TestFindingsBudget(unittest.TestCase):
+    """台帳がプロンプトを圧迫しないこと"""
+
+    def test_文字数の上限が効く(self):
+        many = [{"kind": "number", "raw": f"{i}兆ウォン",
+                 "context": "x" * 80, "source": "web_search(長いクエリ)"}
+                for i in range(40)]
+        out = numeric.format_findings(many)
+        self.assertLessEqual(len(out), numeric.FINDINGS_CHAR_BUDGET + 200)
+
+    def test_新しいものを優先して残す(self):
+        many = [{"kind": "number", "raw": f"{i}兆ウォン",
+                 "context": "x" * 80, "source": "q"} for i in range(40)]
+        kept = [l.split("（")[0].replace("- ", "")
+                for l in numeric.format_findings(many).splitlines()]
+        self.assertIn("39兆ウォン", kept)
+        self.assertNotIn("0兆ウォン", kept)
+
+    def test_少数なら全部残る(self):
+        few = [{"kind": "number", "raw": "83兆ウォン", "context": "コンセンサス", "source": "q"}]
+        self.assertIn("83兆ウォン", numeric.format_findings(few))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
