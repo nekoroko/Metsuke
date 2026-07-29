@@ -3,7 +3,7 @@ langchain
 langchain-openai
 langchain-anthropic
 langgraph
-streamlit
+streamlit>=1.29        # st.container(border=True) を使用
 apscheduler
 
 # エージェントの web_search ツール（tools.py）がホスト上で直接使う。

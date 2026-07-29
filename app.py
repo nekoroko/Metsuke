@@ -18,6 +18,7 @@ from scheduler import start as start_scheduler, add_job, remove_job, run_agent_n
 from config import get_current_provider_info
 from sandbox import (
     image_status as sandbox_image_status, ensure_sandbox_image, parse_mounts,
+    PROFILE_VERIFIED_TOOL,
 )
 from tool_runtime import read_raw, write_raw, format_for_prompt
 import time
@@ -29,6 +30,89 @@ if "scheduler_started" not in st.session_state:
     st.session_state.scheduler_started = True
 
 st.set_page_config(page_title="AI Agent Studio", page_icon="⚡", layout="wide")
+
+
+def _inject_css():
+    """
+    見た目の調整用CSS。
+
+    色は .streamlit/config.toml のテーマ変数に委ね、ここでは余白・角丸・
+    タイポグラフィといった形状だけを扱う。Streamlitの内部クラス名は
+    バージョンで変わるため、比較的安定している data-testid と
+    自前のクラス（as-*）に絞って指定している。
+    """
+    st.markdown(
+        """
+        <style>
+        /* 全体の余白を詰めて情報密度を上げる */
+        .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1400px; }
+
+        /* タブ: 下線タイプにして押しやすくする */
+        [data-testid="stTabs"] [data-baseweb="tab-list"] { gap: 0.25rem; }
+        [data-testid="stTabs"] [data-baseweb="tab"] {
+            padding: 0.6rem 1rem; border-radius: 8px 8px 0 0; font-weight: 500;
+        }
+
+        /* ボタン: 角丸と余白を揃える */
+        .stButton > button {
+            border-radius: 8px; padding: 0.4rem 0.9rem; font-weight: 500;
+            transition: transform .04s ease-in-out;
+        }
+        .stButton > button:active { transform: translateY(1px); }
+
+        /* 入力系の角丸を統一 */
+        .stTextInput input, .stTextArea textarea, .stNumberInput input,
+        .stSelectbox div[data-baseweb="select"] > div { border-radius: 8px; }
+
+        /* コードブロック: 等幅・折り返し・スクロール量を見やすく */
+        .stCode, pre { border-radius: 8px !important; }
+        .stCode code { font-size: 0.82rem; line-height: 1.55; }
+
+        /* カード（st.container(border=True)）の見た目を整える */
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 12px;
+        }
+
+        /* 自前のバッジ */
+        .as-badge {
+            display: inline-block; padding: 0.12rem 0.55rem; border-radius: 999px;
+            font-size: 0.72rem; font-weight: 600; letter-spacing: .02em;
+            vertical-align: middle; white-space: nowrap;
+        }
+        .as-ok      { background: #e7f6ec; color: #17693a; }
+        .as-draft   { background: #fdf3e2; color: #8a5a00; }
+        .as-err     { background: #fdecec; color: #a01b1b; }
+        .as-run     { background: #e8effd; color: #1b4ba0; }
+        .as-muted   { background: #eef0f4; color: #4b5563; }
+
+        /* カード見出し */
+        .as-card-title { font-size: 1.02rem; font-weight: 650; margin: 0 0 .15rem 0; }
+        .as-card-desc  { font-size: .86rem; color: #5b6472; margin: 0; }
+        .as-meta       { font-size: .76rem; color: #79818f; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_inject_css()
+
+
+BADGE_CLASS = {
+    "verified": ("as-ok", "検証済み"),
+    "draft": ("as-draft", "下書き"),
+    "done": ("as-ok", "完了"),
+    "error": ("as-err", "エラー"),
+    "running": ("as-run", "実行中"),
+}
+
+
+def badge(kind: str, label: str = None) -> str:
+    """状態バッジのHTMLを返す（st.markdown(unsafe_allow_html=True) 用）"""
+    cls, default_label = BADGE_CLASS.get(kind, ("as-muted", kind))
+    return f'<span class="as-badge {cls}">{label or default_label}</span>'
+
+
 st.title("⚡ AI Agent Studio")
 st.caption("ツール作成（AI） → 確認・保存 → スケジュール実行 ／ エージェントに自律的に任せる")
 
@@ -49,9 +133,16 @@ tab_create, tab_library, tab_agent, tab_schedule, tab_history, tab_settings = st
 def preview_options(key_prefix: str):
     """
     プレビュー実行時のサンドボックス設定UI。
+
+    ここで指定した内容が効くのは「プレビュー」だけで、「実行」（検証済み
+    ツールの本番実行）は PROFILE_VERIFIED_TOOL の固定値で動く。
+    以前は実行ボタンのすぐ上にチェックボックスだけを並べていたため、
+    実行にも効くように見えてしまっていた。適用範囲を明記する。
+
     ボタンのコールバック内で描画するとリラン時に消えるため、
     プレビューボタンより前に描画して値だけを渡す。
     """
+    st.caption("🧪 **プレビュー実行時の設定**（「実行」には影響しません）")
     col1, col2 = st.columns(2)
     network = col1.checkbox(
         "🌐 ネットワークを許可", key=f"pvnet_{key_prefix}",
@@ -64,6 +155,17 @@ def preview_options(key_prefix: str):
              "オフの場合は読み取り専用でマウントします。",
     )
     return network, writable
+
+
+def verified_profile_caption():
+    """検証済みツールの本番実行がどの権限で動くかを明示する"""
+    p = PROFILE_VERIFIED_TOOL
+    st.caption(
+        "▶ **実行**（検証済みツールの本番実行）は固定設定です: "
+        f"通信{'あり' if p['network'] else 'なし'} / "
+        f"作業ディレクトリ{'書き込み可' if p['writable_workspace'] else '読み取り専用'} / "
+        f"タイムアウト{p['timeout']}秒"
+    )
 
 
 def preview_and_fix(code: str, key_prefix: str, original_prompt: str = "",
@@ -315,45 +417,68 @@ with tab_library:
         st.caption("まだツールがありません。")
     else:
         for t in tools:
-            icon = "✅" if t["status"] == "verified" else "📝"
-            with st.expander(f"{icon} {t['name']} — {t['description'] or ''}", expanded=False):
-                st.caption(f"ID: {t['id']} | {t['status']} | {t['updated_at'][:16]}")
+            # ツールごとにカード（bordered container）で表示する。
+            # 以前は st.expander だったが、一覧時に名前と状態が見えるよう
+            # 常時表示のカードにし、コード本文だけを折りたたむ形にした。
+            with st.container(border=True):
+                head_l, head_r = st.columns([5, 2])
+                with head_l:
+                    st.markdown(
+                        f'<p class="as-card-title">{t["name"]} {badge(t["status"])}</p>'
+                        f'<p class="as-card-desc">{t["description"] or "（説明なし）"}</p>',
+                        unsafe_allow_html=True,
+                    )
+                with head_r:
+                    st.markdown(
+                        f'<p class="as-meta" style="text-align:right">'
+                        f'ID {t["id"]}<br>更新 {t["updated_at"][:16]}</p>',
+                        unsafe_allow_html=True,
+                    )
 
-                edited_code = st.text_area("コード", value=t["code"], height=300, key=f"tc_{t['id']}")
+                with st.expander("📄 コードを表示・編集", expanded=False):
+                    edited_code = st.text_area(
+                        "コード", value=t["code"], height=300,
+                        key=f"tc_{t['id']}", label_visibility="collapsed",
+                    )
+                    st.divider()
+                    pv_network, pv_writable = preview_options(f"lib_{t['id']}")
+                    verified_profile_caption()
 
-                pv_network, pv_writable = preview_options(f"lib_{t['id']}")
-
-                col1, col2, col3, col4 = st.columns(4)
-                run_clicked = col1.button("▶ 実行", key=f"tr_{t['id']}")
-                preview_clicked = col2.button("🧪 プレビュー", key=f"tp_{t['id']}")
+                col1, col2, col3, col4 = st.columns([1, 1, 1.2, 0.6])
+                run_clicked = col1.button(
+                    "▶ 実行", key=f"tr_{t['id']}", type="primary",
+                    disabled=t["status"] != "verified",
+                    use_container_width=True,
+                    help=None if t["status"] == "verified" else "検証済みのツールのみ実行できます",
+                )
+                preview_clicked = col2.button(
+                    "🧪 プレビュー", key=f"tp_{t['id']}", use_container_width=True)
                 new_s = "verified" if t["status"] == "draft" else "draft"
                 lbl = "✅ 検証済みに" if new_s == "verified" else "📝 下書きに"
-                status_clicked = col3.button(lbl, key=f"ts_{t['id']}")
-                delete_clicked = col4.button("🗑️", key=f"td_{t['id']}")
+                status_clicked = col3.button(lbl, key=f"ts_{t['id']}", use_container_width=True)
+                delete_clicked = col4.button(
+                    "🗑️", key=f"td_{t['id']}", use_container_width=True, help="削除")
 
                 # 実行結果はフル幅で表示
                 if run_clicked:
-                    if t["status"] != "verified":
-                        st.warning("検証済みのみ実行可能")
-                    else:
-                        with st.spinner("実行中..."):
-                            r = run_tool(t["id"], t["name"], edited_code)
-                        st.divider()
-                        st.markdown("### 実行結果")
-                        if r["status"] == "done":
-                            st.success("完了")
-                            if r["stdout"]:
-                                st.code(r["stdout"])
-                            else:
-                                st.caption("（出力なし）")
+                    with st.spinner("サンドボックスで実行中..."):
+                        r = run_tool(t["id"], t["name"], edited_code)
+                    st.divider()
+                    st.markdown("**実行結果**")
+                    if r["status"] == "done":
+                        st.success("完了")
+                        if r["stdout"]:
+                            st.code(r["stdout"])
                         else:
-                            st.error("エラー")
-                            if r["stderr"]:
-                                st.markdown("**エラー出力:**")
-                                st.code(r["stderr"])
-                            if r["stdout"]:
-                                st.markdown("**標準出力:**")
-                                st.code(r["stdout"])
+                            st.caption("（出力なし）")
+                    else:
+                        st.error("エラー")
+                        if r["stderr"]:
+                            st.markdown("**エラー出力:**")
+                            st.code(r["stderr"])
+                        if r["stdout"]:
+                            st.markdown("**標準出力:**")
+                            st.code(r["stdout"])
 
                 if preview_clicked:
                     st.divider()
@@ -593,34 +718,50 @@ with tab_history:
         st.caption("まだ実行履歴がありません。")
     else:
         for e in execs:
-            s_icon = {"done": "✅", "error": "❌", "running": "⏳"}.get(e["status"], "❓")
             t_icon = "🔧" if e["exec_type"] == "tool" else "🧠"
             t_label = {"manual": "手動", "schedule": "定期"}.get(e["trigger"], e["trigger"])
 
-            with st.expander(
-                f"{s_icon} {t_icon} {e.get('target_name', '?')} [{t_label}] — {e['started_at'][:16]}",
-                expanded=False,
-            ):
-                st.caption(f"ID: {e['id']} | Type: {e['exec_type']} | {t_label}")
-                if e.get("finished_at"):
-                    st.caption(f"完了: {e['finished_at'][:19]}")
+            # 実行結果はカードで表示し、出力・エラー・ReAct履歴を
+            # それぞれ折りたたみに分ける。以前は全体が1つのexpanderに
+            # 入っていたため、一覧の時点では状態や所要時間が読めなかった。
+            with st.container(border=True):
+                head_l, head_r = st.columns([5, 2])
+                with head_l:
+                    st.markdown(
+                        f'<p class="as-card-title">{t_icon} {e.get("target_name", "?")} '
+                        f'{badge(e["status"])} {badge("muted", t_label)}</p>'
+                        f'<p class="as-meta">開始 {e["started_at"][:19]}'
+                        + (f' / 完了 {e["finished_at"][:19]}' if e.get("finished_at") else "")
+                        + "</p>",
+                        unsafe_allow_html=True,
+                    )
+                with head_r:
+                    st.markdown(
+                        f'<p class="as-meta" style="text-align:right">'
+                        f'ID {e["id"]}<br>{e["exec_type"]}</p>',
+                        unsafe_allow_html=True,
+                    )
+
                 if e.get("stdout"):
-                    st.markdown("**出力:**")
-                    st.markdown(e["stdout"])
+                    with st.expander("📤 出力", expanded=False):
+                        st.markdown(e["stdout"])
                 if e.get("stderr"):
-                    st.markdown("**エラー:**")
-                    st.code(e["stderr"])
+                    with st.expander("⚠️ エラー出力", expanded=False):
+                        st.code(e["stderr"])
                 if e.get("history"):
                     try:
                         history = json.loads(e["history"])
-                        with st.expander("ReActループ履歴", expanded=False):
+                    except (json.JSONDecodeError, TypeError):
+                        history = None
+                    if history:
+                        with st.expander(f"🔁 ReActループ履歴（{len(history)}件）", expanded=False):
                             for entry in history:
                                 if entry["role"] == "assistant":
                                     st.markdown(f"🤖 {entry['content']}")
                                 elif entry["role"] == "result":
                                     st.code(entry["content"])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                if not any(e.get(k) for k in ("stdout", "stderr", "history")):
+                    st.caption("（記録された出力はありません）")
 
 
 # ========== タブ6: 設定 ==========

@@ -1,0 +1,20 @@
+# Streamlitのテーマ設定
+#
+# 配色はここに集約する。app.py 側のCSSは余白やコンポーネントの形状だけを
+# 扱い、色は極力このテーマ変数（primaryColor等）に委ねる。
+# 利用者が右上メニューから別テーマに切り替えても破綻しないようにするため。
+
+[theme]
+base = "light"
+primaryColor = "#4f46e5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f5fa"
+textColor = "#1f2430"
+font = "sans serif"
+
+[server]
+# 開発中にファイルを保存したら自動で再読み込みする
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
