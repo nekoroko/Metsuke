@@ -1498,3 +1498,77 @@ class TestCorrectionCountSemantics(unittest.TestCase):
             {"role": "assistant", "content": "DONE: 利益率は99.9% [実績] でした。"}]
         out = self.graph.correct_step(s)
         self.assertEqual(out["status"], "running", "素通りで予算を使い切っている")
+
+
+class TestOhlcTimeSeries(unittest.TestCase):
+    """
+    株価の時系列テーブル（単位も区切りも無い）専用の抽出。
+
+    実測（2026-07-30 / qwen3.5-4b / ReAct）で、原文にある終値・高値・安値を
+    「出典に見当たらない」と却下し、本文に（出典未確認）を付けた事故の回帰。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        self.case, self.raw = _raw_fixture("doc28_yahoo_timeseries")
+
+    def test_ヘッダから欄の並びを読む(self):
+        self.assertEqual(self.numeric.parse_ohlc_header(self.raw),
+                         self.case["header_order"])
+
+    def test_7日分のOHLCを復元する(self):
+        rows = self.numeric.parse_ohlc_rows(self.raw)
+        self.assertEqual(len(rows), len(self.case["expected_rows"]))
+        for got, want in zip(rows, self.case["expected_rows"]):
+            self.assertEqual(got["date"], want["date"])
+            for field in ("始値", "高値", "安値", "終値"):
+                self.assertEqual(got["fields"].get(field), want[field],
+                                 f"{want['date']} の {field}")
+
+    def test_ヘッダが無ければ欄名を付けない(self):
+        # 推測で欄名を割り当てると、ラベルの付け替えと同じ事故になる
+        no_header = "2026/7/28135.91136.49128.29130.17\n"
+        rows = self.numeric.parse_ohlc_rows(no_header)
+        self.assertEqual(rows[0]["fields"], {})
+        self.assertEqual(rows[0]["values"][:4],
+                         ["135.91", "136.49", "128.29", "130.17"])
+
+    def test_実在する株価は却下されない(self):
+        hist = [{"role": "result", "content": self.raw}]
+        for value in self.case["recovered_by_ohlc"]:
+            r = self.checker(output=f"終値は{value} [実績] でした。", history=hist)
+            self.assertEqual(r["verdict"], "OK", f"{value} が却下された: {r['issues']}")
+
+    def test_隣の日の終値では通さない(self):
+        # 128.29 と 127.29 の差は0.78%。丸め用の許容幅（1%）を当てると通ってしまう
+        hist = [{"role": "result", "content": self.raw}]
+        r = self.checker(output="終値は127.29ドル [実績] でした。", history=hist)
+        self.assertIn("見当たりません", " ".join(r["issues"]))
+
+    def test_対象外として整理した値は変わらず却下される(self):
+        # 「52週安値124.80」はラベル隣接の裸数値。案2の領域なので今回は未対応
+        hist = [{"role": "result", "content": self.raw}]
+        for value in self.case["out_of_scope"]["values"]:
+            r = self.checker(output=f"安値は{value} [実績] でした。", history=hist)
+            self.assertIn("見当たりません", " ".join(r["issues"]))
+
+    def test_出典に無い株価は却下される(self):
+        hist = [{"role": "result", "content": self.raw}]
+        r = self.checker(output="終値は999.99ドル [実績] でした。", history=hist)
+        self.assertIn("見当たりません", " ".join(r["issues"]))
+
+    def test_時系列以外のページから価格を作らない(self):
+        # 記事・気配値表・ページ装飾には、この解釈を広げない
+        for case_id in ("doc25_biggo_article", "doc28_moomoo_quote", "doc23_moomoo_concat"):
+            _, raw = _raw_fixture(case_id)
+            self.assertEqual(self.numeric.parse_ohlc_rows(raw), [],
+                             f"{case_id} から時系列行を誤検出した")
+
+    def test_台帳には入れない(self):
+        # 1ページで数十件になり、台帳の上限とプロンプト予算を食い潰すため
+        led = self.numeric.collect_from_text(self.raw, source="fetch_url(yahoo)")
+        self.assertEqual([f for f in led if f["kind"] == "number"], [])

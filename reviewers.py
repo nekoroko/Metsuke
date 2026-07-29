@@ -9,7 +9,7 @@ from numeric import (
     dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
     label_value_mismatches, candidates_for, tag_conflicts,
     appears_verbatim, labeled_values, primary_label, TRUNCATION_MARK,
-    candidate_suggestion,
+    candidate_suggestion, ohlc_values, matches_bare,
 )
 
 
@@ -382,6 +382,9 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
 
     チェックB: 未照合の数値
         回答中の単位付き数値が、検索結果にも出典にも存在しない場合に指摘する。
+        株価の時系列表は単位も区切りも無く TOKEN_RE では拾えないため、
+        専用経路（ohlc_values）で読んだ値とも突き合わせる。実測で、原文に
+        ある終値・高値・安値を「出典に無い」と却下した事故が起きている。
 
     チェックC: 予想を実績として書いていないか
         [実績] と書かれた数値の出典側の文脈に「予想」「コンセンサス」等が
@@ -425,11 +428,15 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
                  or any(TRUNCATION_MARK in t for t in source_texts))
 
     candidates = _history_numbers(history, sources)
+    # 時系列表から読み取れた価格。単位が無いので「存在するか」の判定にだけ使う
+    bare = ohlc_values(source_texts)
     answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(output or "")}
     for n in extract_numbers(output or ""):
         # 抽出は完璧ではない。原文にその表記がそのまま出ているなら、
         # 「出典に無い」と断じない（実測で、原文にある売上高が却下された）
-        if not matches_any(n, candidates) and not appears_verbatim(n["raw"], source_texts):
+        if (not matches_any(n, candidates)
+                and not appears_verbatim(n["raw"], source_texts)
+                and not matches_bare(n, bare)):
             label = answer_labels.get(n["raw"], "")
             kind, hints = candidate_suggestion(n, findings or [], label=label)
             if kind == "labeled":

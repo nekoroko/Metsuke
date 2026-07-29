@@ -1089,3 +1089,120 @@ def append_missing_confirmed(answer: str, missing: list) -> tuple:
     )
     applied = [f"確定済みの「{c['raw']}」を末尾に補記しました" for c in missing]
     return answer + block, applied
+
+
+# ===== 株価の時系列テーブル（単位も区切りも無い） =====
+#
+# HTML→テキスト変換で区切りが消えた時系列表は、こういう1行になる。
+#
+#   2026/7/28135.91136.49128.29130.1751,088,282130.17
+#
+# 単位が付かないので TOKEN_RE では1件も拾えず、回答が正しく引用した
+# 「130.17ドル」が「出典に見当たらない」と却下された（実測 2026-07-30）。
+#
+# ここは汎用の数値抽出には手を入れず、専用の経路として切り出す。
+# 成立するのは「価格は小数2桁」という構造的な前提があるからで、
+# 前提の無い場所へこの解釈を広げてはいけない。
+
+# 日付。2026/7/28 と 2026-07-28 を受ける
+_OHLC_DATE = r"\d{4}[/-]\d{1,2}[/-]\d{1,2}"
+
+# 価格トークン。カンマ区切りの整数部＋小数2桁、または7桁までの整数＋小数2桁。
+# 出来高（51,088,282）のような桁数の大きい値は、後ろに別の値が連結されて
+# いることが多く信用できないため、名前の付いた価格欄だけを採用する。
+_OHLC_PRICE = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}|\d{1,7}\.\d{2}")
+
+_OHLC_ROW = re.compile(r"(?P<date>" + _OHLC_DATE + r")(?P<rest>[\d.,]{8,})")
+
+# ヘッダ行に現れる欄名。並び順はサイトごとに違うので、必ずヘッダから読む。
+OHLC_FIELDS = ("始値", "高値", "安値", "終値", "調整後終値",
+               "出来高", "売買高", "前日比", "変化率")
+PRICE_FIELDS = ("始値", "高値", "安値", "終値", "調整後終値")
+
+
+def parse_ohlc_header(text: str) -> list:
+    """
+    ヘッダ行から欄の並びを読む。「日付始値高値安値終値出来高調整後終値」→ 並び。
+
+    並び順はサイトごとに違う（Yahoo!は始値から、Investing.comは終値から）。
+    ヘッダが無ければ空リストを返し、その場合は欄名を付けない。
+    """
+    for line in (text or "").splitlines():
+        if "日付" not in line or len(line) > 60:
+            continue
+        order, pos = [], line.index("日付") + 2
+        rest = line[pos:]
+        while rest:
+            for field in OHLC_FIELDS:
+                if rest.startswith(field):
+                    order.append(field)
+                    rest = rest[len(field):]
+                    break
+            else:
+                break
+        if len(order) >= 3:
+            return order
+    return []
+
+
+def parse_ohlc_rows(text: str) -> list[dict]:
+    """
+    時系列表の行を {"date", "fields": {欄名: 値}, "values": [値]} に分解する。
+
+    欄名が分からない場合（ヘッダなし）は fields を空にして values だけ返す。
+    値の対応を推測で埋めると、ラベルの付け替えと同じ事故になる。
+    """
+    order = parse_ohlc_header(text)
+    rows = []
+    for m in _OHLC_ROW.finditer(text or ""):
+        values = _OHLC_PRICE.findall(m.group("rest"))
+        if not values:
+            continue
+        fields = {}
+        for name, value in zip(order, values):
+            if name in PRICE_FIELDS:
+                fields[name] = value
+        rows.append({"date": m.group("date"), "values": values, "fields": fields})
+    return rows
+
+
+def ohlc_values(source_text) -> list[float]:
+    """
+    時系列表から読み取れた価格の値を返す（照合専用）。
+
+    単位が無いので「値が出典に存在するか」の判定にだけ使う。
+    台帳へは入れない。1ページで数十件になり、台帳の上限（40件）と
+    プロンプト予算を株価表だけで埋めてしまうため。
+    """
+    out = []
+    for text in _as_texts(source_text):
+        for row in parse_ohlc_rows(text):
+            names = row["fields"]
+            picked = list(names.values()) if names else row["values"][:4]
+            for raw in picked:
+                try:
+                    out.append(float(raw.replace(",", "")))
+                except ValueError:
+                    continue
+    return out
+
+
+# 時系列表の値は丸めのない実数なので、照合は完全一致で行う。
+# MATCH_TOLERANCE（1%）は「約84兆ウォン」のような丸め表記のための幅であり、
+# 株価に当てると隣の日の終値（128.29 と 127.29 は差0.78%）まで通ってしまう。
+BARE_MATCH_TOLERANCE = 0.0
+
+
+def matches_bare(entry: dict, values: list,
+                 tolerance: float = BARE_MATCH_TOLERANCE) -> bool:
+    """単位を問わず、同じ値が時系列表にあるか（完全一致）。"""
+    target = abs(entry.get("value", 0) or 0)
+    if not target:
+        return False
+    for v in values:
+        if v == target:
+            return True
+        scale = max(abs(v), target)
+        if tolerance and scale and abs(v - target) / scale <= tolerance:
+            return True
+    return False
