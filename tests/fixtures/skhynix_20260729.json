@@ -1,0 +1,22 @@
+{
+  "_comment": "exec ID ecc0bed2 (2026-07-29) の実行から、numeric_checker の回帰テストに必要な部分を抜き出したもの。docs/accuracy-improvements.md §0 を参照。",
+  "history": [
+    {"role": "assistant", "content": "THOUGHT: まずサジェストを取得する。\nACTION: suggest_keywords(SKハイニックス)"},
+    {"role": "result", "content": "「SKハイニックス」に関連してよく検索されるキーワード:\n- skハイニックス 株価\n- skハイニックス 決算"},
+    {"role": "assistant", "content": "THOUGHT: 株価を調べる。\nACTION: web_search(SKハイニックス 株価)"},
+    {"role": "result", "content": "タイトル: SKハイニックス【SKHY】株価・チャート\nURL: https://www.moomoo.com/ja/stock/SKHY-US\n概要: 143.020 -11.550 -7.47% 終値 07/27 16:00 ET\n---\nタイトル: SKハイニックス | 000660.KS 株価動向とリアルタイム相場\nURL: https://finance.biggo.jp/quote/000660.KS\n概要: 前日終値1,919,000 当日株価範囲1,759,000 - 1,759,000 決算発表日2026/04/23 EPS（直近12ヶ月）103,521"},
+    {"role": "assistant", "content": "THOUGHT: 決算を調べる。\nACTION: web_search(SKハイニックス 決算)"},
+    {"role": "result", "content": "タイトル: SKハイニックス、29日に2Q決算発表へ AIメモリー好況で\nURL: https://finance.biggo.jp/news/2694607f\n概要: SKハイニックスが29日に第2四半期決算の発表を控える中、証券業界のコンセンサスは売上高約83兆ウォン（約9兆円）、営業利益約64兆ウォン（約7兆円）で、前年同期比で営業利益が約650％増加する計算だ。\n---\nタイトル: SKハイニックスの決算はメモリ株にとって次の大きなシグナル\nURL: http://www.moomoo.com/ja/community/feed/sk-hynix-earnings\n概要: SKハイニックスは第1四半期の売上高52兆5763億ウォン、営業利益37兆6103億ウォンを計上した。"},
+    {"role": "assistant", "content": "THOUGHT: 株価動向を調べる。\nACTION: web_search(SKハイニックス 株価 動向)"},
+    {"role": "result", "content": "タイトル: SKハイニックス | 000660.KS 株価動向とリアルタイム相場\nURL: https://finance.biggo.jp/quote/000660.KS\n概要: -160,000 8.34% 今日 取引終了：7月24日 午後5:02"},
+    {"role": "assistant", "content": "THOUGHT: 市場サイクルを調べる。\nACTION: web_search(メモリ 半導体 市場 サイクル)"},
+    {"role": "result", "content": "タイトル: AIが牽引するメモリ・スーパーサイクル\nURL: https://finance.biggo.jp/news/986720ae\n概要: 世界のメモリ市場規模は昨年の360兆ウォン（約37.9兆円）から今年は1,500兆ウォン（約158兆円）へと成長した。"}
+  ],
+  "answer": "SKハイニックスの最新の株価動向と業績について調査した結果は以下の通りです。\n\n1. 業績の実績値と予想値の比較\n* 【アナリスト・会社発表の予想値】: 業界コンセンサスでは売上高約9兆ウォン（約9兆円）、営業利益約7兆ウォン（約7兆円）といった過去最高益更新の見込みが強まっています。\n* 【実績値】: 直近の実績値は、第1四半期において売上高52兆5763億ウォン、営業利益37兆6103億ウォンといった好調な結果が報告されています。\n\n2. 株価について\n* 直近の値動き: 具体的な「過去1週間」にわたる変動チャートを提示する記事はありませんでしたが、市場の関心は極めて高く推移しています。\n\n3. 過去数ヶ月における評価の変遷\n評価軸が「汎用需要」から「AIによる供給の侵食」へと完全にシフトしました。",
+  "expected": {
+    "verdict": "NEEDS_REVISION",
+    "must_flag": ["9兆ウォン", "7兆ウォン"],
+    "must_not_flag": ["52兆5763億ウォン", "37兆6103億ウォン"],
+    "ledger_must_contain": ["-7.47%", "83兆ウォン", "29日"]
+  }
+}

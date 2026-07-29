@@ -3,6 +3,9 @@
 import re
 from config import get_llm, extract_text_content, invoke_with_retry
 from datetime import datetime
+from numeric import (
+    extract_numbers, find_conversion_pairs, conversion_plausible, matches_any,
+)
 
 
 # ===== プロンプト定義 =====
@@ -286,6 +289,70 @@ def generic_reviewer(task: str, output: str, history: list = None) -> dict:
     return result
 
 
+# ===== 機械チェック（LLMを使わないレビュアー） =====
+
+def _history_numbers(history: list, sources: list = None) -> list[dict]:
+    """
+    照合の母集団を作る。検索結果（role=result）と、出典本文から抽出した
+    facts の両方を対象にする。
+    """
+    texts = [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+    numbers = []
+    for t in texts:
+        numbers.extend(extract_numbers(t))
+    for s in (sources or []):
+        for f in s.get("facts", []):
+            numbers.extend(extract_numbers(f.get("raw", "")))
+    return numbers
+
+
+def numeric_checker(output: str, history: list = None, sources: list = None) -> dict:
+    """
+    回答中の数値を、実行履歴と出典から機械的に突き合わせる。LLMは使わない。
+
+    チェックA: 換算併記の整合
+        「9兆ウォン（約9兆円）」のように、ウォンと円がほぼ同値になっている等、
+        桁として成立しない換算を検出する。出典を見ずに回答単体で判定できる。
+
+    チェックB: 未照合の数値
+        回答中の単位付き数値が、検索結果にも出典にも存在しない場合に指摘する。
+
+    LLMに数値照合をさせない理由は docs/accuracy-improvements.md §0.1 を参照。
+    実測で、書く側と検証する側の双方が「ありそうな値」へ無意識に正規化していた。
+    """
+    issues = []
+
+    for pair in find_conversion_pairs(output or ""):
+        if not conversion_plausible(pair):
+            issues.append(
+                f"換算が矛盾しています: 「{pair['raw']}」。"
+                f"{pair['src_unit']}と{pair['dst_unit']}の比率が桁として成立していません"
+                f"（比率 {pair['ratio']:.3g}）。"
+                f"検索結果の値をそのまま書き写せているか確認してください。"
+            )
+
+    candidates = _history_numbers(history, sources)
+    for n in extract_numbers(output or ""):
+        if not matches_any(n, candidates):
+            issues.append(
+                f"「{n['raw']}」は検索結果・出典のどこにも見当たりません。"
+                f"出典の数値をそのまま書き写すか、この数値を削除してください"
+                f"（該当箇所: …{n['context']}…）。"
+            )
+
+    return {
+        "reviewer": "numeric_checker",
+        "verdict": "NEEDS_REVISION" if issues else "OK",
+        "issues": issues,
+        "instruction": (
+            "指摘された数値を、検索結果に書かれている値そのものに直してください。"
+            "単位（ウォン／円／億／兆）を変換しないこと。"
+            "換算値を併記する場合は、元の値を主として書き、換算は括弧内に留めること。"
+        ) if issues else "",
+        "raw": "",
+    }
+
+
 # ===== Dispatcher =====
 
 REVIEWER_REGISTRY = {
@@ -294,7 +361,16 @@ REVIEWER_REGISTRY = {
     "security_reviewer": security_reviewer,
     "data_analyst": data_analyst,
     "generic_reviewer": generic_reviewer,
+    "numeric_checker": numeric_checker,
 }
+
+# LLMの選定に委ねず、常に実行するレビュアー。
+# numeric_checker はLLM呼び出しを伴わないため、常時走らせてもコストが無い。
+ALWAYS_ON_REVIEWERS = ["numeric_checker"]
+
+
+def _with_always_on(names: list[str]) -> list[str]:
+    return list(dict.fromkeys(list(names) + ALWAYS_ON_REVIEWERS))
 
 
 def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> list[str]:
@@ -308,11 +384,11 @@ def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> lis
     """
     # 明示指定があれば早期return
     if output_type == "code":
-        return ["code_reviewer", "security_reviewer"]
+        return _with_always_on(["code_reviewer", "security_reviewer"])
     if output_type == "research":
-        return ["fact_checker"]
+        return _with_always_on(["fact_checker"])
     if output_type == "data":
-        return ["data_analyst"]
+        return _with_always_on(["data_analyst"])
 
     # autoの場合はLLMで判定
     llm = get_llm(temperature=0.1)
@@ -329,7 +405,7 @@ def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> lis
 
     reviewers_m = re.search(r"REVIEWERS:\s*(.+)", content)
     if not reviewers_m:
-        return ["generic_reviewer"]
+        return _with_always_on(["generic_reviewer"])
 
     reviewers_str = reviewers_m.group(1).strip()
     # 改行などで止める
@@ -337,7 +413,7 @@ def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> lis
     candidates = [r.strip() for r in reviewers_str.split(",")]
     # 有効なレビュアーだけ残す
     selected = [r for r in candidates if r in REVIEWER_REGISTRY]
-    return selected if selected else ["generic_reviewer"]
+    return _with_always_on(selected if selected else ["generic_reviewer"])
 
 
 def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
@@ -366,15 +442,33 @@ def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
                     code=kwargs.get("code", "") or kwargs.get("output", ""),
                     task=kwargs.get("task", ""),
                 )
+            elif name == "numeric_checker":
+                result = fn(
+                    output=kwargs.get("output", ""),
+                    history=kwargs.get("history", []),
+                    sources=kwargs.get("sources", []),
+                )
             results.append(result)
         except Exception as e:
-            results.append({
-                "reviewer": name,
-                "verdict": "OK",
-                "issues": [],
-                "instruction": "",
-                "raw": f"レビュアー実行エラー: {e}",
-            })
+            # LLMレビュアーの失敗はOK扱いにする（API不調で全体を止めないため）。
+            # ただし機械チェックの失敗は実装の不具合であり、黙って通すと
+            # 検証していないのに検証したことになるので、issueとして残す。
+            if name in ALWAYS_ON_REVIEWERS:
+                results.append({
+                    "reviewer": name,
+                    "verdict": "OK",
+                    "issues": [f"{name} の実行に失敗しました（数値の機械照合は未実施）: {e}"],
+                    "instruction": "",
+                    "raw": "",
+                })
+            else:
+                results.append({
+                    "reviewer": name,
+                    "verdict": "OK",
+                    "issues": [],
+                    "instruction": "",
+                    "raw": f"レビュアー実行エラー: {e}",
+                })
     return results
 
 
