@@ -35,20 +35,24 @@ SETTING_KEY = "default_graph_kind"
 # ステートマシンは1ラウンドで search / digest と2ノード進むため、
 # ReActと同じ step 予算（10）では correct / critic が「差し戻す予算がない」
 # と判断してレビューを飛ばしてしまう。工程数に合わせて広げる。
-# critic の指摘を反映するには compose 枠が1つ要る。critic 予算が compose 予算と
-# 同数だと、最後の指摘が必ず反映されないまま終わる（実測で毎回発生していた）。
-# 不変条件: max_critiques <= max_composes - 1
+# compose 枠は、初稿1回 + correct の差し戻し + critic の差し戻し のすべてが消費する。
+# 「critic <= compose - 1」だけでは足りず、実測（doc27）では correct が枠を
+# 食い尽くして最後の critic 指摘が反映されないまま終わっていた。
+# 不変条件: max_composes >= 1 + max_corrections + max_critiques
 KIND_BUDGETS = {
     REACT: {},
-    RESEARCH: {"max_steps": 18, "max_rounds": 3, "max_composes": 3, "max_critiques": 2},
+    RESEARCH: {"max_steps": 18, "max_rounds": 3, "max_critiques": 2,
+               "max_corrections": 2, "reserve_compose_for_critic": 1},
 }
 
 
 def _enforce_budget_invariant(budgets: dict) -> dict:
+    """compose 枠を、初稿と2種類の差し戻しが全部収まる数に引き上げる。"""
     out = dict(budgets)
-    composes = out.get("max_composes")
-    if composes is not None:
-        out["max_critiques"] = min(out.get("max_critiques", 2), max(1, composes - 1))
+    if "max_critiques" not in out and "max_corrections" not in out:
+        return out
+    needed = 1 + out.get("max_corrections", 2) + out.get("max_critiques", 2)
+    out["max_composes"] = max(out.get("max_composes", 0), needed)
     return out
 
 

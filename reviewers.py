@@ -8,6 +8,7 @@ from numeric import (
     format_findings, forecast_marked_as_actual, untagged_ratio,
     dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
     label_value_mismatches, candidates_for, tag_conflicts,
+    appears_verbatim, labeled_values, primary_label, TRUNCATION_MARK,
 )
 
 
@@ -410,24 +411,36 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
                 f"検索結果の値をそのまま書き写せているか確認してください。"
             )
 
+    # 連結せずテキストの並びとして持つ。連結すると、別々のページの末尾と
+    # 先頭がたまたま隣り合って「ラベルが近い」と誤判定する
+    source_texts = (
+        [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+        + [f.get("context", "") for f in (findings or [])]
+        + [s.get("excerpt", "") for s in (sources or [])]
+    )
+    truncated = any(TRUNCATION_MARK in t for t in source_texts)
+
     candidates = _history_numbers(history, sources)
+    answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(output or "")}
     for n in extract_numbers(output or ""):
-        if not matches_any(n, candidates):
-            hints = candidates_for(n, findings or [])
+        # 抽出は完璧ではない。原文にその表記がそのまま出ているなら、
+        # 「出典に無い」と断じない（実測で、原文にある売上高が却下された）
+        if not matches_any(n, candidates) and not appears_verbatim(n["raw"], source_texts):
+            hints = candidates_for(n, findings or [], label=answer_labels.get(n["raw"], ""))
             suggestion = (
                 f"次の値に置き換えてください: {'、'.join(hints)}" if hints
                 else "置き換えられる値は取得済みの情報にありません。削除してください"
             )
+            trunc_note = (
+                "（出典の本文が途中で切れています。切れた先に書かれている可能性があります）"
+                if truncated else ""
+            )
             issues.append(
                 f"「{n['raw']}」は検索結果・出典のどこにも見当たりません。"
-                f"{suggestion}（該当箇所: …{n['context']}…）。"
+                f"{suggestion}{trunc_note}（該当箇所: …{n['context']}…）。"
             )
 
-    source_text = " ".join(
-        [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
-        + [f.get("context", "") for f in (findings or [])]
-    )
-    for m in label_value_mismatches(output or "", findings or [], source_text):
+    for m in label_value_mismatches(output or "", findings or [], source_texts):
         if m["reason"] == "value":
             issues.append(
                 f"「{m['label']}」の値が出典と違います。回答は「{m['raw']}」ですが、"

@@ -1049,3 +1049,110 @@ class TestVerifyBudgetNote(unittest.TestCase):
         out = self.graph.verify_tool_step(self.state)
         out2 = self.graph.verify_tool_step({**self.state, **out})
         self.assertEqual(len(out2["verification_notes"]), 1)
+
+
+def _noisy(case_id):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "noisy_sources.json")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    for c in data["cases"]:
+        if c["id"] == case_id:
+            return c
+    raise KeyError(case_id)
+
+
+class TestNoisyRealText(unittest.TestCase):
+    """
+    実行で問題を起こしたテキストの形（連結・複数出現・切断）で検証する。
+
+    理想化したサンプルだけでは、この種の誤検出・見落としは再現しない。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        import numeric
+        self.checker = numeric_checker
+        self.numeric = numeric
+
+    def _ledger(self, raw):
+        return self.numeric.collect_from_text(raw, source="web_search(x)", step=1)
+
+    def test_同じラベルと約が何度も出る記事で誤検出しない(self):
+        case = _noisy("article_multiple_approx")
+        led = self._ledger(case["raw"])
+        hist = [{"role": "result", "content": case["raw"]}]
+        for statement in case["true_statements"]:
+            r = self.checker(output=statement, history=hist, findings=led)
+            self.assertEqual(r["verdict"], "OK", f"{statement} → {r['issues']}")
+
+    def test_連結された株価表で正しい組は通す(self):
+        case = _noisy("stock_table_concat")
+        led = self._ledger(case["raw"])
+        hist = [{"role": "result", "content": case["raw"]}]
+        for label, value in case["correct_pairs"]:
+            r = self.checker(output=f"{label}は{value} [実績] です。",
+                             history=hist, findings=led)
+            self.assertNotIn("ラベルの対応", " ".join(r["issues"]),
+                             f"{label}={value} が誤検出された: {r['issues']}")
+
+    def test_連結された株価表で付け替えは捕まえる(self):
+        case = _noisy("stock_table_concat")
+        led = self._ledger(case["raw"])
+        hist = [{"role": "result", "content": case["raw"]}]
+        for label, value in case["wrong_pairs"]:
+            r = self.checker(output=f"{label}は{value} [実績] です。",
+                             history=hist, findings=led)
+            self.assertIn("ラベルの対応", " ".join(r["issues"]),
+                          f"{label}={value} の付け替えを見逃した")
+
+    def test_韓国語ソースと日本語回答を食い違い扱いしない(self):
+        case = _noisy("korean_mixed")
+        led = self._ledger(case["raw"])
+        hist = [{"role": "result", "content": case["raw"]}]
+        for statement in case["true_statements"]:
+            r = self.checker(output=statement, history=hist, findings=led)
+            self.assertEqual(r["verdict"], "OK", f"{statement} → {r['issues']}")
+
+    def test_途中切断は捏造と区別して伝える(self):
+        case = _noisy("truncated_body")
+        body = case["raw_head"] + self.numeric.TRUNCATION_MARK
+        r = self.checker(output=f"為替は{case['invented_number']} [実績] でした。",
+                         history=[{"role": "result", "content": body}])
+        joined = " ".join(r["issues"])
+        self.assertIn("見当たりません", joined)
+        self.assertIn("途中で切れて", joined)
+
+    def test_切断が無ければ切断の注記は出ない(self):
+        r = self.checker(output="為替は1,380ウォン [実績] でした。",
+                         history=[{"role": "result", "content": "15日のソウル外国為替市場。"}])
+        self.assertNotIn("途中で切れて", " ".join(r["issues"]))
+
+
+class TestCandidateFiltering(unittest.TestCase):
+    """置換候補は単位・桁・ラベルで絞る"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        self.numeric = numeric
+        self.led = numeric.collect_from_text(
+            "株価は266,000ウォン。営業利益は9.2兆ウォン。売上高は22.3兆ウォン。"
+            "セクター指数は0.55%。前日比は-14.65%。",
+            source="web_search(x)")
+
+    def test_桁が違う値は候補にしない(self):
+        entry = self.numeric.extract_numbers("9.9兆ウォン")[0]
+        cands = self.numeric.candidates_for(entry, self.led)
+        self.assertNotIn("266,000ウォン", cands)
+
+    def test_単位が違う値は候補にしない(self):
+        entry = self.numeric.extract_numbers("9.9兆ウォン")[0]
+        self.assertFalse([c for c in self.numeric.candidates_for(entry, self.led)
+                          if "%" in c])
+
+    def test_ラベルが一致する候補を先に出す(self):
+        entry = self.numeric.extract_numbers("9.9兆ウォン")[0]
+        cands = self.numeric.candidates_for(entry, self.led, label="営業利益")
+        self.assertEqual(cands[0], "9.2兆ウォン")

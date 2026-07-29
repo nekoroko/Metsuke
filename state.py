@@ -28,13 +28,15 @@ class AgentState(TypedDict):
     queries_done: list[str]   # 実行済みクエリ（同じクエリの空回りを防ぐ）
     compose_count: int        # レポートを書いた回数（差し戻しを含む）
     max_composes: int         # レポート執筆の上限
+    reserve_compose_for_critic: int  # criticの差し戻し用に空けておくcompose枠
     confirmed: list[dict]     # 出典と一致して検証済みになった数値（書き換え禁止）
     fetched_urls: list[str]   # 本文取得を試みたURL（再試行の抑制に使う）
 
 
 def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
                        max_tool_verifies: int = 6, max_corrections: int = 2,
-                       max_rounds: int = 3, max_composes: int = 3) -> AgentState:
+                       max_rounds: int = 3, max_composes: int = 3,
+                       reserve_compose_for_critic: int = 0) -> AgentState:
     """
     エージェントの初期状態を生成する。
 
@@ -71,6 +73,7 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "queries_done": [],
         "compose_count": 0,
         "max_composes": max_composes,
+        "reserve_compose_for_critic": reserve_compose_for_critic,
         "confirmed": [],
         "fetched_urls": [],
     }

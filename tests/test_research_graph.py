@@ -546,3 +546,72 @@ class TestConfirmedInCompose(unittest.TestCase):
         self.assertIn("確定済み", seen["prompt"])
         self.assertIn("22.3兆ウォン", seen["prompt"])
         self.assertIn("理由を1行で", seen["prompt"])
+
+
+class TestComposeBudgetAccounting(unittest.TestCase):
+    """
+    compose 枠は、初稿・correct の差し戻し・critic の差し戻しの全部が消費する。
+
+    doc27 では correct が枠を使い切り、最後の critic 指摘が
+    「執筆枠が残っていない」で捨てられていた。
+    """
+
+    def test_初稿と両方の差し戻しが収まる枠がある(self):
+        s = graphs.make_state(graphs.RESEARCH, "t")
+        self.assertGreaterEqual(
+            s["max_composes"], 1 + s["max_corrections"] + s["max_critiques"])
+
+    def test_correctはcriticの枠を食わない(self):
+        import graph
+        from state import make_initial_state
+        # critic が2回残っているのに compose 枠が2しかない状況
+        state = make_initial_state("決算", max_composes=4, max_critiques=2,
+                                   reserve_compose_for_critic=1)
+        state["compose_count"] = 2
+        state["findings"] = []
+        state["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォン"},
+            {"role": "assistant", "content": "DONE: 利益率は99.9% [実績] でした。"},
+        ]
+        out = graph.correct_step(state)
+        self.assertEqual(out["status"], "needs_revision")   # 差し戻さず critic へ
+        self.assertEqual(gr.route_after_correct(out), "critic")
+
+    def test_枠があるうちは差し戻す(self):
+        import graph
+        from state import make_initial_state
+        state = make_initial_state("決算", max_composes=5, max_critiques=2,
+                                   reserve_compose_for_critic=1)
+        state["compose_count"] = 1
+        state["findings"] = []
+        state["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォン"},
+            {"role": "assistant", "content": "DONE: 利益率は99.9% [実績] でした。"},
+        ]
+        out = graph.correct_step(state)
+        self.assertEqual(out["status"], "running")
+        self.assertEqual(gr.route_after_correct(out), "compose")
+
+
+class TestConfirmedRestoration(unittest.TestCase):
+    """確定済みの値は、差し戻せない場合に本文へ機械的に補記する"""
+
+    def test_消えた確定済みの値を末尾に戻す(self):
+        import graph
+        from state import make_initial_state
+        from numeric import collect_from_text
+        state = make_initial_state("決算", max_composes=3,
+                                   reserve_compose_for_critic=1)
+        state["findings"] = collect_from_text(
+            "売上高は22.3兆ウォン。28日終値は-14.65%。", source="web_search(x)")
+        state["confirmed"] = [{"raw": "-14.65%", "label": "終値", "value_type": "actual"}]
+        state["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォン。28日終値は-14.65%。"},
+            {"role": "assistant", "content": "DONE: 売上高は22.3兆ウォン [実績] のみ。"},
+        ]
+        state["step_count"] = 10          # 差し戻せない
+        out = graph.correct_step(state)
+        done = [e for e in out["history"] if e["role"] == "assistant"][-1]["content"]
+        self.assertIn("検証済みだが本文に反映されなかった値", done)
+        self.assertIn("-14.65%", done)
+        self.assertTrue(any("補記" in n for n in out["verification_notes"]))

@@ -149,7 +149,12 @@ def fetch_url(url: str) -> str:
     text = html_to_text(raw) if "<" in raw[:1000] else raw
     if not text.strip():
         return "本文を抽出できませんでした（JavaScriptで描画されるページの可能性があります）。"
-    return text[:FETCH_MAX_CHARS]
+    if len(text) > FETCH_MAX_CHARS:
+        # 途中で切れたことを明示する。印が無いと、切れた先にあった数値を
+        # 書いたのか、無いところから作ったのかを後段が区別できない
+        from numeric import TRUNCATION_MARK
+        return text[:FETCH_MAX_CHARS] + TRUNCATION_MARK
+    return text
 
 
 # ===== Web検索: プロバイダごとの実装 =====

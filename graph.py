@@ -12,6 +12,7 @@ from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
     claims_absence, unused_numbers, extract_numbers, mechanical_fixes,
     confirmed_from, merge_confirmed, missing_confirmed, format_confirmed,
+    append_missing_confirmed,
 )
 from datetime import datetime
 
@@ -955,9 +956,22 @@ def correct_step(state: AgentState) -> AgentState:
     # 「最後に出力される回答こそ検証されない」という逆の構造になっていた。
     # 実測で、ステップ上限際で出力された回答に、履歴に存在しない数値
     # （売上構成比20%以上など）が含まれたまま素通りしている。
+    # compose 枠の予約を尊重する。correct の差し戻しも compose を1つ消費するため、
+    # 予約しないと critic が呼ばれる頃には枠が尽きている（実測でそうなっていた）。
+    # 「critic 予算 <= compose 予算 - 1」は、correct が枠を食わない前提でしか
+    # 成り立たない不変条件だった。
+    # 残っている critic の回数ぶんだけ compose 枠を空けておく。
+    # correct が枠を使い切ると、critic の指摘は必ず反映されないまま終わる。
+    reserve = 0
+    if state.get("reserve_compose_for_critic"):
+        reserve = max(0, state.get("max_critiques", 0) - state.get("critique_count", 0))
+    composes_left = state.get("max_composes", 0) - state.get("compose_count", 0)
+    compose_ok = (not reserve) or (composes_left - reserve) > 0
+
     can_retry = (
         state.get("correction_count", 0) < state.get("max_corrections", 2)
         and state["max_steps"] - state["step_count"] > 1
+        and compose_ok
     )
 
     if not can_retry:
@@ -965,6 +979,12 @@ def correct_step(state: AgentState) -> AgentState:
         # 未照合数値の注記）は、予算外の軽量パスとしてその場で適用する。
         fixed_text, applied = mechanical_fixes(
             done_content, state.get("findings", []), state["history"])
+        # 検出だけして消えたままにしない。確定済みで本文から落ちた値は、
+        # 末尾に一覧として機械的に戻す（本文の文脈へ差し込むのは危険なので、
+        # 追記にとどめる）
+        fixed_text, restored = append_missing_confirmed(
+            fixed_text, missing_confirmed(fixed_text, state.get("confirmed", [])))
+        applied += restored
         new_history = list(state["history"])
         if applied:
             for i in range(len(new_history) - 1, -1, -1):

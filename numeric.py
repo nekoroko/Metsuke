@@ -564,9 +564,20 @@ def label_after(text: str, end: int) -> str:
 _NON_LABELS = ("です", "でした", "だった", "でしたが", "となった", "になった",
                "であり", "となり", "から", "まで", "ほど", "程度", "以上", "以下")
 
+# 「約650%」の「約」のような数量修飾語はラベルではない。これをラベルとして
+# 扱うと、文書中に何度も出てくる「約」が別々の値と結び付き、正しい記述が
+# 食い違いと判定される。
+_LABEL_MODIFIERS = ("約", "およそ", "ほぼ", "概算", "推定", "最大", "最小", "計", "合計")
+
 
 def _clean_label(label: str) -> str:
     if not label:
+        return ""
+    for mod in _LABEL_MODIFIERS:
+        if label.endswith(mod):
+            label = label[: -len(mod)]
+    label = strip_particle(label)
+    if not label or label in _LABEL_MODIFIERS:
         return ""
     if label in _NON_LABELS or label.endswith(("です", "でした", "ました", "だった")):
         return ""
@@ -659,7 +670,75 @@ def classify_value_type(context: str) -> str:
 VALUE_TYPE_TAGS = {"actual": ACTUAL_TAG, "forecast": FORECAST_TAG, "unknown": UNKNOWN_TAG}
 
 
-def label_value_mismatches(answer: str, findings: list, source_text: str = "") -> list[dict]:
+_WS = re.compile(r"[\s　]+")
+
+
+def _normalize_digits(text: str) -> str:
+    return _WS.sub("", (text or "").replace(",", "").replace("，", ""))
+
+
+def appears_verbatim(raw: str, source_text) -> bool:
+    """
+    数値の表記が、出典の原文にそのまま出てくるか。
+
+    抽出は完璧ではない（改行が数値の途中に入る、空白が挟まる、単位が
+    離れる等）。抽出結果だけで「出典に存在しない」と断じると、原文には
+    確かに書いてある値を捏造として却下してしまう。原文の文字列でも確認する。
+    """
+    if not raw or not source_text:
+        return False
+    norm_raw = _normalize_digits(raw)
+    return any(norm_raw in _normalize_digits(t) for t in _as_texts(source_text))
+
+
+def _as_texts(source_text) -> list:
+    """文字列でもリストでも受け、重複を除いたテキストの並びにする。"""
+    if not source_text:
+        return []
+    texts = [source_text] if isinstance(source_text, str) else list(source_text)
+    seen, out = set(), []
+    for t in texts:
+        t = t or ""
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def cooccurs(label: str, raw: str, source_text, window: int = 12) -> bool:
+    """
+    出典の原文で、そのラベルとその値が近くに出てくるか。
+
+    同じラベル（「売上高」）が文書内に何度も出てきて、それぞれ別の値と
+    組になっているのが普通である。「そのラベルの代表値はこれ1つ」と
+    決め打ちすると、正しい組み合わせを食い違いと判定してしまう。
+    出現ごとに独立して見る。
+
+    窓を狭く（12文字）取るのは、「その出現のすぐ隣にラベルがある」ことだけを
+    確かめたいため。広く取ると、同じ段落に別の指標のラベルがあるだけで
+    何でも通ってしまい、付け替えの検出が効かなくなる。
+    """
+    if not label or not raw:
+        return False
+    norm_raw = _normalize_digits(raw)
+    norm_label = _normalize_digits(label)
+    # テキストは1件ずつ見る。連結した文字列で探すと、別のページの末尾と
+    # 次のページの先頭がたまたま隣り合って「近くにある」と誤判定する
+    for text in _as_texts(source_text):
+        norm_src = _normalize_digits(text)
+        start = 0
+        while True:
+            idx = norm_src.find(norm_raw, start)
+            if idx < 0:
+                break
+            left = max(0, idx - window)
+            if norm_label in norm_src[left:idx + len(norm_raw) + window]:
+                return True
+            start = idx + 1
+    return False
+
+
+def label_value_mismatches(answer: str, findings: list, source_text="") -> list[dict]:
     """
     回答の「ラベル: 値」の組が、出典側の組と食い違っているものを返す。
 
@@ -681,16 +760,46 @@ def label_value_mismatches(answer: str, findings: list, source_text: str = "") -
         return []
 
     out = []
+    source_blob = "\n".join(_as_texts(source_text))
+
     for a in labeled_values(answer or ""):
         labels = _labels_of(a)
         if not labels:
             continue
 
-        # (a) 同じラベルが出典にあるのに、値が違う
+        same_value = [s for s in source
+                      if s["unit"] == a["unit"] and matches_any(a, [s])]
+        tabular_hits = [s for s in same_value
+                        if looks_tabular(sentence_containing(s["context"], s["raw"]))]
+
+        # (1) 表のなれの果て: 隣接する順序で判定する。
+        # 「…売買代金0.55%売買回転率配当利回り--…」のように、正しいラベルの
+        # すぐ後ろに別のラベルが続く。距離ではなく「値のすぐ隣か」を見る。
+        if tabular_hits:
+            if any(_adjacent_label(l, s) for s in tabular_hits for l in labels):
+                continue
+            if not any(l in source_blob for l in labels):
+                continue                   # 出典に無いラベル＝言い換え
+            hit = tabular_hits[0]
+            out.append({
+                "label": primary_label(a),
+                "raw": a["raw"],
+                "expected": sorted(_labels_of(hit))[:3],
+                "reason": "label",
+                "context": hit["context"],
+            })
+            continue
+
+        # (2) 文章: 原文でそのラベルと値が隣り合っていれば正しい組み合わせ。
+        # 同じラベルが他の値にも付いていても関係ない（1ラベル・複数値）
+        if any(cooccurs(l, a["raw"], source_text) for l in labels):
+            continue
+
+        # (3) 同じラベルが出典にあるのに、値が違う
         same_label = [s for s in source if labels & _labels_of(s)]
         if same_label:
             if any(s["unit"] == a["unit"] and matches_any(a, [s]) for s in same_label):
-                continue                   # ラベルも値も一致
+                continue
             out.append({
                 "label": primary_label(a),
                 "raw": a["raw"],
@@ -698,43 +807,64 @@ def label_value_mismatches(answer: str, findings: list, source_text: str = "") -
                 "reason": "value",
                 "context": a["context"],
             })
-            continue
-
-        # (b) 値は出典にあるが、出典ではそのラベルが別の値に付いている
-        if not any(l in (source_text or "") for l in labels):
-            continue                       # 出典に無いラベル＝言い換え。判定しない
-        same_value = [s for s in source
-                      if s["unit"] == a["unit"] and matches_any(a, [s])]
-        for s in same_value:
-            if not looks_tabular(sentence_containing(s["context"], s["raw"])):
-                continue                   # 文章。隣接ラベルの一致は要求できない
-            if _labels_conflict(labels, _labels_of(s)):
-                out.append({
-                    "label": primary_label(a),
-                    "raw": a["raw"],
-                    "expected": sorted(_labels_of(s))[:3],
-                    "reason": "label",
-                    "context": s["context"],
-                })
-                break
     return out
 
 
-def candidates_for(entry: dict, findings: list, limit: int = 3) -> list[str]:
-    """置き換え候補になりうる値を台帳から探す（同じ単位のものを新しい順に）。"""
-    out = []
+def _adjacent_label(answer_label: str, entry: dict) -> bool:
+    """
+    表形式のデータで、そのラベルが値のすぐ隣に来ているか。
+
+    区切りが無いテキストではラベルが数珠つなぎになる（「売買回転率配当利回り」）。
+    値の直前なら末尾、直後なら先頭に来ているものが、その値のラベルである。
+    """
+    before = entry.get("label_before", "")
+    after = entry.get("label_after", "")
+    if not answer_label:
+        return False
+    if before and (before.endswith(answer_label) or answer_label.endswith(before)):
+        return True
+    if after and (after.startswith(answer_label) or answer_label.startswith(after)):
+        return True
+    return False
+
+
+# 置換候補として許す桁の開き。営業利益（兆ウォン）の候補に
+# 株価（数十万ウォン）を出さないための帯。
+CANDIDATE_MAGNITUDE_RATIO = 1000
+
+
+def candidates_for(entry: dict, findings: list, limit: int = 3,
+                   label: str = "") -> list[str]:
+    """
+    置き換え候補になりうる値を台帳から探す。
+
+    条件は3つ。単位が同じ、桁が近い（1000倍以内）、ラベルが分かるなら一致。
+    単位だけで絞ると、兆ウォンの利益の候補に株価や指数が並ぶ。
+    実測で、無関係な値が候補として提示されている。
+    """
+    same_label, same_scale = [], []
     for f in reversed(findings or []):
         if f.get("kind") != "number":
             continue
         parsed = extract_numbers(f.get("raw", ""))
         if not parsed or parsed[0]["unit"] != entry.get("unit"):
             continue
-        if f["raw"] in out:
+        value = abs(parsed[0]["value"])
+        base = abs(entry.get("value", 0) or 0)
+        if base and value:
+            ratio = max(value / base, base / value)
+            if ratio > CANDIDATE_MAGNITUDE_RATIO:
+                continue                   # 桁が違いすぎる。別物である
+        if f["raw"] in same_label or f["raw"] in same_scale:
             continue
-        out.append(f["raw"])
-        if len(out) >= limit:
-            break
-    return out
+        f_labels = {l for lv in labeled_values(f.get("context", ""))
+                    if _normalize_digits(lv["raw"]) == _normalize_digits(f["raw"])
+                    for l in _labels_of(lv)}
+        if label and any(label == l or label in l or l in label for l in f_labels):
+            same_label.append(f["raw"])
+        else:
+            same_scale.append(f["raw"])
+    return (same_label + same_scale)[:limit]
 
 
 def tag_conflicts(answer: str, findings: list) -> list[dict]:
@@ -768,6 +898,11 @@ def tag_conflicts(answer: str, findings: list) -> list[dict]:
 
 
 UNVERIFIED_MARK = "（出典未確認）"
+
+# 本文が文字数上限で切れたことを示す印。取得側が付け、検証側が読む。
+# 切れた先にある数値を書いた場合と、何も無いところから作った場合とでは
+# 意味が違うので、区別できるようにしておく。
+TRUNCATION_MARK = "…（本文はここで切れています）"
 
 
 def mechanical_fixes(answer: str, findings: list, history: list = None) -> tuple:
@@ -872,3 +1007,28 @@ def missing_confirmed(answer: str, confirmed: list) -> list[dict]:
         if not matches_any(parsed[0], now):
             out.append(c)
     return out
+
+
+def append_missing_confirmed(answer: str, missing: list) -> tuple:
+    """
+    確定済みなのに本文から落ちた値を、末尾に一覧として戻す。
+
+    本文の文脈へ差し込むのは機械にはできない（どの文のどこに入れるべきかが
+    決まらない）ので、追記にとどめる。検出だけして消えたままにするよりは、
+    読み手に見える形で戻す方がよい。
+    """
+    if not missing:
+        return answer, []
+    lines = []
+    for c in missing:
+        tag = VALUE_TYPE_TAGS.get(c.get("value_type", ""), "")
+        label = c.get("label") or "（ラベルなし）"
+        lines.append(f"- {label}: {c['raw']} {tag}".rstrip())
+    block = (
+        "\n\n**検証済みだが本文に反映されなかった値**\n\n"
+        + "\n".join(lines)
+        + "\n\n_これらは出典と一致することを確認済みの数値です。"
+        "書き直しの過程で本文から抜けたため、機械的に補記しました。_"
+    )
+    applied = [f"確定済みの「{c['raw']}」を末尾に補記しました" for c in missing]
+    return answer + block, applied
