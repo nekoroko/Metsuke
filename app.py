@@ -15,7 +15,10 @@ from executor import (
 from ai_creator import generate_tool, fix_code
 from scheduler import start as start_scheduler, add_job, remove_job, run_agent_now
 from config import get_current_provider_info
-from sandbox import image_status as sandbox_image_status
+from sandbox import image_status as sandbox_image_status, ensure_sandbox_image
+from tool_runtime import (
+    read_raw, write_raw, format_for_prompt, check_host_packages, install_to_host,
+)
 import time
 
 # --- 初期化 ---
@@ -959,3 +962,98 @@ with tab_settings:
         "※ agent-project（ReActエージェントのコア）もこのDBの設定を参照するため、"
         "ここでの変更はツール実行・エージェント実行・レビュアーすべてに反映されます。"
     )
+
+    # ========== ツール実行時ライブラリ ==========
+    st.divider()
+    st.subheader("ツール実行時ライブラリ")
+    st.caption(
+        "AI生成ツール（Type1）が使ってよい外部ライブラリの一覧です。"
+        "AIが自分でライブラリを追加することはできないため、追加・削除はここで行います。"
+    )
+
+    _img = sandbox_image_status()
+    _badge = {
+        "ready": ("✅ サンドボックスイメージは最新です", st.success),
+        "stale": ("⚠️ ライブラリ定義が変更されています。次回のプレビュー実行時に自動で再ビルドされます", st.warning),
+        "missing": ("ℹ️ サンドボックスイメージは未ビルドです。初回のプレビュー実行時に自動でビルドされます", st.info),
+        "user_managed": (
+            f"🔧 AGENT_SANDBOX_IMAGE で指定されたイメージ（{_img['image']}）を使用中です。"
+            "自動ビルドの対象外のため、イメージの管理は利用者側で行ってください",
+            st.info,
+        ),
+    }[_img["state"]]
+    _badge[1](_badge[0])
+
+    st.markdown("**定義ファイル（`requirements-tools.txt`）**")
+    st.caption(
+        "1行に1パッケージ。行末の「# ...」はAIへの説明文として使われます。"
+        "バージョン指定（例: `pandas>=2.0`）も書けます。"
+    )
+    _libs_text = st.text_area(
+        "requirements-tools.txt",
+        value=read_raw(),
+        height=260,
+        label_visibility="collapsed",
+        key="libs_raw",
+    )
+
+    lib_col1, lib_col2 = st.columns(2)
+    with lib_col1:
+        if st.button("💾 保存", type="primary", key="libs_save"):
+            write_raw(_libs_text)
+            st.success(
+                "保存しました。AIへの許可リストは即座に反映されます。"
+                "サンドボックスイメージは次回のプレビュー実行時に自動で再ビルドされます。"
+            )
+            st.rerun()
+    with lib_col2:
+        if st.button("🔄 イメージを今すぐ再ビルド", key="libs_rebuild"):
+            with st.spinner("イメージをビルド中...（数分かかります）"):
+                _r = ensure_sandbox_image(force=True)
+            if _r["ok"]:
+                st.success("ビルドが完了しました。")
+                st.rerun()
+            else:
+                st.error("ビルドに失敗しました。")
+                st.code(_r["message"])
+
+    st.markdown("**AIに提示される許可リスト（このファイルから自動生成）**")
+    st.code(format_for_prompt(), language="text")
+
+    st.markdown("**ホスト側（検証済みツールの実行環境）の状態**")
+    st.caption(
+        "検証済みツールはサンドボックスではなくホスト上で直接実行されるため、"
+        "こちらにもインストールが必要です。"
+    )
+    _host = check_host_packages()
+    _missing = [p["name"] for p in _host if not p["installed"]]
+
+    st.table([
+        {
+            "パッケージ": p["name"],
+            "状態": "✅ インストール済み" if p["installed"] else "❌ 未インストール",
+            "バージョン": p["version"] or "-",
+        }
+        for p in _host
+    ])
+
+    if _missing:
+        st.warning(
+            f"未インストール: {', '.join(_missing)} — "
+            "このままだと、これらを使う検証済みツールはホスト実行時に "
+            "ModuleNotFoundError になります。"
+        )
+        if st.button("📥 ホストにインストール", key="libs_host_install"):
+            with st.spinner("pip install を実行中..."):
+                _r = install_to_host()
+            if _r["ok"]:
+                st.success(
+                    "インストールが完了しました。"
+                    "ツール実行は毎回新しいプロセスで動くため、再起動は不要です。"
+                )
+                st.rerun()
+            else:
+                st.error("インストールに失敗しました。")
+                st.code(_r["message"])
+    else:
+        st.success("必要なライブラリはすべてインストール済みです。")
