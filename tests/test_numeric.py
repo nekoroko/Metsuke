@@ -153,5 +153,97 @@ class TestNumericCheckerRegression(unittest.TestCase):
         self.assertEqual(r["verdict"], "OK", f"誤検出: {r['issues']}")
 
 
+
+class TestCorrectNode(unittest.TestCase):
+    """correct ノード（訂正チェック）のふるまい"""
+
+    def setUp(self):
+        import types
+        for name, attrs in (("langchain_openai", {"ChatOpenAI": object}),):
+            if name not in sys.modules:
+                m = types.ModuleType(name)
+                for k, v in attrs.items():
+                    setattr(m, k, v)
+                sys.modules[name] = m
+        if "langgraph.graph" not in sys.modules:
+            lg = types.ModuleType("langgraph")
+            lgg = types.ModuleType("langgraph.graph")
+
+            class _SG:
+                def __init__(self, *a, **k): pass
+                def add_node(self, *a, **k): pass
+                def set_entry_point(self, *a, **k): pass
+                def add_conditional_edges(self, *a, **k): pass
+                def compile(self, *a, **k): return object()
+
+            lgg.StateGraph = _SG
+            lgg.END = "END"
+            sys.modules["langgraph"] = lg
+            sys.modules["langgraph.graph"] = lgg
+
+        import graph
+        from state import make_initial_state
+        self.graph = graph
+        self.fx = load_fixture()
+        self.state = make_initial_state("SKハイニックスの最新の株価動向と業績")
+        self.state["history"] = list(self.fx["history"]) + [
+            {"role": "assistant", "content": "THOUGHT: まとめる\nDONE: " + self.fx["answer"]}
+        ]
+        self.state["step_count"] = 6
+
+    def test_誤りがあれば差し戻す(self):
+        out = self.graph.correct_step(self.state)
+        self.assertEqual(out["status"], "running", "react へ差し戻されていない")
+        self.assertEqual(out["correction_count"], 1)
+        feedback = out["history"][-1]["content"]
+        self.assertIn("自動訂正チェック", feedback)
+        self.assertIn("9兆ウォン", feedback)
+
+    def test_誤りがなければcriticへ進む(self):
+        clean = "売上高は83兆ウォン（約9兆円）、営業利益は64兆ウォン（約7兆円）でした。"
+        self.state["history"][-1] = {"role": "assistant", "content": "DONE: " + clean}
+        out = self.graph.correct_step(self.state)
+        self.assertEqual(out["status"], "needs_revision")
+        self.assertEqual(self.graph.route_after_correct(out), "critic")
+
+    def test_差し戻し上限で素通しする(self):
+        self.state["correction_count"] = 2
+        out = self.graph.correct_step(self.state)
+        self.assertEqual(out["status"], "needs_revision")
+        self.assertEqual(self.graph.route_after_correct(out), "critic")
+
+    def test_ステップ予算がなければ素通しする(self):
+        self.state["step_count"] = self.state["max_steps"] - 1
+        out = self.graph.correct_step(self.state)
+        self.assertEqual(out["status"], "needs_revision")
+
+    def test_DONEはcorrectへ流れる(self):
+        s = dict(self.state, status="needs_revision")
+        self.assertEqual(self.graph.route_after_react(s), "correct")
+
+
+class TestFetchUrl(unittest.TestCase):
+    """HTMLからのテキスト抽出"""
+
+    def setUp(self):
+        import tools
+        self.tools = tools
+
+    def test_scriptとstyleを除去する(self):
+        html = ('<html><head><style>.a{color:red}</style></head><body>'
+                '<script>var x="9兆ウォン";</script>'
+                '<p>売上高約83兆ウォン（約9兆円）。</p></body></html>')
+        text = self.tools.html_to_text(html)
+        self.assertNotIn("var x", text)
+        self.assertNotIn("color:red", text)
+        self.assertIn("83兆ウォン", text)
+
+    def test_抽出後に数値照合ができる(self):
+        html = "<p>コンセンサスは売上高約83兆ウォン（約9兆円）。</p>"
+        text = self.tools.html_to_text(html)
+        pairs = numeric.find_conversion_pairs(text)
+        self.assertEqual(len(pairs), 1)
+        self.assertTrue(numeric.conversion_plausible(pairs[0]))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

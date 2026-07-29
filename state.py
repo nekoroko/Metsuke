@@ -16,10 +16,13 @@ class AgentState(TypedDict):
     tool_verify_count: int    # verify_toolノードを通った回数（step_countとは別管理）
     max_tool_verifies: int    # verify_toolノードの最大実行回数
     findings: list[dict]      # 検索結果から機械抽出した数値・日付。履歴トリミングの対象外
+    sources: list[dict]       # 出典の取得結果（digestノード用。現時点では未使用）
+    correction_count: int     # correctノードを通った回数
+    max_corrections: int      # 訂正の差し戻し上限
 
 
 def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
-                       max_tool_verifies: int = 6) -> AgentState:
+                       max_tool_verifies: int = 6, max_corrections: int = 2) -> AgentState:
     """
     エージェントの初期状態を生成する。
 
@@ -45,4 +48,7 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "tool_verify_count": 0,
         "max_tool_verifies": max_tool_verifies,
         "findings": [],
+        "sources": [],
+        "correction_count": 0,
+        "max_corrections": max_corrections,
     }

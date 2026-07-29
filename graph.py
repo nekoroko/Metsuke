@@ -5,7 +5,9 @@ from config import get_llm, extract_reasoning_tokens, invoke_with_continuation, 
 from state import AgentState
 from tools import get_tool_fn, get_tool_names, build_workspace_context, is_tool_verifiable
 from sandbox import execute_in_sandbox, PROFILE_AGENT_CODE
-from reviewers import dispatch_reviewers, run_reviewers, aggregate_results
+from reviewers import (
+    dispatch_reviewers, run_reviewers, aggregate_results, numeric_checker,
+)
 from numeric import collect_from_text, merge_findings, format_findings
 from datetime import datetime
 
@@ -543,6 +545,74 @@ def verify_tool_step(state: AgentState) -> AgentState:
     }
 
 
+def _extract_done(history: list) -> str:
+    for entry in reversed(history):
+        if entry["role"] == "assistant" and "DONE:" in entry.get("content", ""):
+            return entry["content"].split("DONE:")[1].strip()
+    return ""
+
+
+def correct_step(state: AgentState) -> AgentState:
+    """
+    DONEの内容を機械チェックにかけ、数値の誤りがあれば訂正を差し戻す。
+
+    LLMは呼ばない。critic（LLMレビュー）より前に置いているのは、
+    数値が誤ったまま内容レビューに入ると、critic が誤った前提の上に
+    指摘を積み上げてしまうため。
+
+    status の使い分けに注意する。既存の route_after_react は
+    needs_revision を「critic へ」の意味で使っているので、ここでも
+    それに合わせ、訂正が必要なときだけ running にして react へ戻す。
+    """
+    if state.get("correction_count", 0) >= state.get("max_corrections", 2):
+        return {**state, "status": "needs_revision"}
+    if state["max_steps"] - state["step_count"] <= 1:
+        # 差し戻す予算がないので、そのまま critic へ送る
+        return {**state, "status": "needs_revision"}
+
+    done_content = _extract_done(state["history"])
+    if not done_content:
+        return {**state, "status": "needs_revision"}
+
+    try:
+        result = numeric_checker(
+            output=done_content,
+            history=state["history"],
+            sources=state.get("sources", []),
+        )
+    except Exception as e:
+        # 機械チェックの失敗でループを止めない。ただし黙って通さず履歴に残す
+        return {
+            **state,
+            "history": state["history"] + [{
+                "role": "result",
+                "content": f"（自動訂正チェック）実行に失敗したため数値の照合は未実施です: {e}",
+            }],
+            "status": "needs_revision",
+            "correction_count": state.get("correction_count", 0) + 1,
+        }
+
+    if result["verdict"] == "OK":
+        return {
+            **state,
+            "status": "needs_revision",
+            "correction_count": state.get("correction_count", 0) + 1,
+        }
+
+    feedback = "（自動訂正チェック）最終回答の数値に問題があります。\n"
+    feedback += "\n".join(f"- {i}" for i in result["issues"])
+    if result["instruction"]:
+        feedback += f"\n\n{result['instruction']}"
+    feedback += "\n訂正した上で、再度DONEで最終回答を出してください。"
+
+    return {
+        **state,
+        "history": state["history"] + [{"role": "result", "content": feedback}],
+        "status": "running",
+        "correction_count": state.get("correction_count", 0) + 1,
+    }
+
+
 def critic_step(state: AgentState) -> AgentState:
     """専門家プールによるレビュー"""
     if state["critique_count"] >= state["max_critiques"]:
@@ -611,7 +681,9 @@ def route_after_react(state: AgentState) -> str:
     if state["status"] == "error":
         return END
     if state["status"] == "needs_revision":
-        return "critic"
+        # まず機械チェック（correct）を通してから critic へ。
+        # 数値が誤ったまま内容レビューに入ると、誤った前提の上に指摘が積まれる。
+        return "correct"
     if state["status"] == "done":
         return END
     if (
@@ -630,6 +702,14 @@ def route_after_verify_tool(state: AgentState) -> str:
     return "react"
 
 
+def route_after_correct(state: AgentState) -> str:
+    if state["status"] == "error":
+        return END
+    if state["status"] == "running":
+        return "react"          # 訂正を求めて差し戻す
+    return "critic"
+
+
 def route_after_critic(state: AgentState) -> str:
     if state["status"] == "done":
         return END
@@ -640,10 +720,15 @@ workflow = StateGraph(AgentState)
 workflow.add_node("react", react_step)
 workflow.add_node("critic", critic_step)
 workflow.add_node("verify_tool", verify_tool_step)
+workflow.add_node("correct", correct_step)
 workflow.set_entry_point("react")
 workflow.add_conditional_edges(
     "react", route_after_react,
-    {"react": "react", "critic": "critic", "verify_tool": "verify_tool", END: END}
+    {"react": "react", "correct": "correct", "verify_tool": "verify_tool", END: END}
+)
+workflow.add_conditional_edges(
+    "correct", route_after_correct,
+    {"react": "react", "critic": "critic", END: END}
 )
 workflow.add_conditional_edges(
     "verify_tool", route_after_verify_tool,

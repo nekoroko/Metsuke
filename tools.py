@@ -1,9 +1,11 @@
 # tools.py — エージェントが使うツール群
 import os
+import re
 import json
 import sqlite3
 import urllib.request
 import urllib.parse
+from html.parser import HTMLParser
 from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
 from settings_store import read_settings as _read_settings
 
@@ -80,18 +82,74 @@ def run_shell(command: str) -> str:
     return output[:2000] if output.strip() else "(出力なし)"
 
 
+class _TextExtractor(HTMLParser):
+    """HTMLから本文テキストだけを取り出す"""
+
+    SKIP = {"script", "style", "noscript", "head", "svg"}
+    BREAK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.buf = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip_depth += 1
+        elif tag in self.BREAK:
+            self.buf.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.buf.append(data)
+
+
+def html_to_text(html: str) -> str:
+    """
+    HTMLをテキストへ変換する。
+
+    beautifulsoup4 はサンドボックスイメージ側にしか無く、ホストでは使えないため
+    標準ライブラリの html.parser を使う。script/style の中身は捨てる
+    （JS内の文字列が本文の数値と混ざると、数値照合の母集団が汚れるため）。
+    """
+    parser = _TextExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        return html
+    text = "".join(parser.buf)
+    text = re.sub(r"[ \t　]{2,}", " ", text)
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
+FETCH_MAX_CHARS = 8000
+
+
 def fetch_url(url: str) -> str:
-    """URLを取得する"""
+    """
+    URLを取得して本文テキストを返す。
+
+    以前は生のHTMLを先頭3000文字返していたため、タグとJSでほとんどが埋まり、
+    本文にたどり着かないことが多かった。タグを除去したうえで上限を広げている。
+    """
     try:
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0"}
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            content = resp.read().decode("utf-8", errors="replace")
-        return content[:3000]
+            raw = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return f"エラー: {e}"
+
+    text = html_to_text(raw) if "<" in raw[:1000] else raw
+    if not text.strip():
+        return "本文を抽出できませんでした（JavaScriptで描画されるページの可能性があります）。"
+    return text[:FETCH_MAX_CHARS]
 
 
 # ===== Web検索: プロバイダごとの実装 =====
