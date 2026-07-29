@@ -13,16 +13,26 @@
 
 import re
 
-SCALE = {"兆": 10 ** 12, "億": 10 ** 8, "万": 10 ** 4}
+# 桁の表記。日本語（兆億万）と韓国語（조억만）の両方を受ける。
+# エージェントは対象国の言語で検索することがあり、実測では
+# 韓国語ソース（NAVER金融、韓国メディア）から得た数値が
+# まるごと抽出できておらず、株価の暴落（-14.65%）が台帳に載らなかった。
+SCALE = {
+    "兆": 10 ** 12, "億": 10 ** 8, "万": 10 ** 4,
+    "조": 10 ** 12, "억": 10 ** 8, "만": 10 ** 4,
+}
 
 # 単位付きの数値のみを対象にする。単位の無い裸の数値は、日付・件数・IDと
 # 区別できず誤検出の温床になるため拾わない。
-_UNITS = "ウォン|円|ドル|%|％"
+_UNITS = "ウォン|원|円|ドル|달러|%|％|퍼센트"
+
+# 符号。韓国語の「마이너스」（マイナス）も負号として扱う。
+_SIGN = r"[-−▲△+]|마이너스\s*|마이나스\s*"
 
 TOKEN_RE = re.compile(
-    r"(?P<sign>[-−▲△+])?"
-    r"(?P<n1>\d[\d,]*(?:\.\d+)?)(?P<s1>兆|億|万)?"
-    r"(?:(?P<n2>\d[\d,]*)(?P<s2>億|万))?"      # 「52兆5763億」のような複合表記
+    r"(?P<sign>" + _SIGN + r")?"
+    r"(?P<n1>\d[\d,]*(?:\.\d+)?)(?P<s1>兆|億|万|조|억|만)?"
+    r"(?:(?P<n2>\d[\d,]*)(?P<s2>億|万|억|만))?"   # 「52兆5763億」「78조9680억」のような複合表記
     r"\s*(?P<unit>" + _UNITS + r")"
 )
 
@@ -32,8 +42,9 @@ DATE_RE = re.compile(
 
 # 「83兆ウォン（約9兆円）」のような換算の併記
 PAIR_RE = re.compile(
-    r"(?P<a>\d[\d,]*(?:\.\d+)?(?:兆|億|万)?)\s*(?P<au>ウォン|円|ドル)"
-    r"\s*[（(]\s*約?\s*(?P<b>\d[\d,]*(?:\.\d+)?(?:兆|億|万)?)\s*(?P<bu>ウォン|円|ドル)\s*[）)]"
+    r"(?P<a>\d[\d,]*(?:\.\d+)?(?:兆|億|万|조|억|만)?)\s*(?P<au>ウォン|원|円|ドル|달러)"
+    r"\s*[（(]\s*約?\s*(?P<b>\d[\d,]*(?:\.\d+)?(?:兆|億|万|조|억|만)?)"
+    r"\s*(?P<bu>ウォン|원|円|ドル|달러)\s*[）)]"
 )
 
 # 為替は動くので、桁の取り違えだけを捉えられる広いレンジにする。
@@ -57,15 +68,26 @@ def _to_value(sign, n1, s1, n2, s2) -> float:
     value = float(n1.replace(",", "")) * SCALE.get(s1, 1)
     if n2:
         value += float(n2.replace(",", "")) * SCALE.get(s2, 1)
-    return -value if sign in ("-", "−", "▲", "△") else value
+    if sign and (sign[0] in ("-", "−", "▲", "△") or sign.startswith(("마이너스", "마이나스"))):
+        return -value
+    return value
 
 
 def _context(text: str, start: int, end: int) -> str:
     return text[max(0, start - CONTEXT_CHARS):end + CONTEXT_CHARS].replace("\n", " ").strip()
 
 
+# 表記の違いを吸収する。韓国語ソースの「원」と日本語回答の「ウォン」は
+# 同じ通貨なので、同一視しないと照合が成立しない。
+_UNIT_ALIASES = {
+    "％": "%", "퍼센트": "%",
+    "원": "ウォン",
+    "달러": "ドル",
+}
+
+
 def normalize_unit(unit: str) -> str:
-    return "%" if unit in ("%", "％") else unit
+    return _UNIT_ALIASES.get(unit, unit)
 
 
 def extract_numbers(text: str) -> list[dict]:
@@ -124,7 +146,7 @@ def find_conversion_pairs(text: str) -> list[dict]:
 
 def _split_scale(token: str):
     """「83兆」→ ("83", "兆")"""
-    m = re.match(r"(\d[\d,]*(?:\.\d+)?)(兆|億|万)?", token)
+    m = re.match(r"(\d[\d,]*(?:\.\d+)?)(兆|億|万|조|억|만)?", token)
     return m.group(1), m.group(2)
 
 
@@ -132,9 +154,10 @@ def conversion_plausible(pair: dict) -> bool:
     """換算の比率が桁として成立しているか"""
     if pair["src"] == 0:
         return True                       # 判定不能。指摘しない
-    if pair["src_unit"] == pair["dst_unit"]:
+    if normalize_unit(pair["src_unit"]) == normalize_unit(pair["dst_unit"]):
         return abs(pair["src"] - pair["dst"]) < 1e-9
-    band = CONVERSION_BANDS.get((pair["src_unit"], pair["dst_unit"]))
+    band = CONVERSION_BANDS.get(
+        (normalize_unit(pair["src_unit"]), normalize_unit(pair["dst_unit"])))
     if band is None:
         return True                       # 未知の通貨ペアは判定しない
     return band[0] <= pair["ratio"] <= band[1]

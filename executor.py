@@ -38,6 +38,35 @@ def _extract_done_text(history: list) -> str:
     return ""
 
 
+def _append_verification_notes(text: str, notes: list) -> str:
+    """
+    機械照合で引っかかったが、ステップ予算が尽きて差し戻せなかった項目を
+    最終回答の末尾に出す。
+
+    黙って通すと、確認できていない数値が「検証済みのレポート」として
+    読まれてしまう。直せないなら、せめて直せなかったことを見せる。
+    """
+    if not notes:
+        return text
+    body = "\n".join(f"- {n}" for n in notes)
+    return (
+        f"{text}\n\n---\n\n"
+        "**⚠️ 自動検証で確認できなかった点**\n\n"
+        f"{body}\n\n"
+        "_これらはステップ上限に達したため訂正できませんでした。"
+        "該当箇所は出典を確認してから利用してください。_"
+    )
+
+
+def _finalize_result(final_state: dict) -> str:
+    """最終回答を組み立てる（本文 → 検証メモ → 時点表示）"""
+    text = _extract_done_text(final_state.get("history", []))
+    if not text:
+        return ""
+    text = _append_verification_notes(text, final_state.get("verification_notes", []))
+    return _stamp_result(text)
+
+
 def _stamp_result(text: str) -> str:
     """
     レポートの先頭に基準時刻を付ける。
@@ -101,7 +130,7 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
         # 最終結果を抽出
         result_text = ""
         if final_state["status"] == "done":
-            result_text = _stamp_result(_extract_done_text(final_state["history"]))
+            result_text = _finalize_result(final_state)
         elif final_state["status"] == "error":
             result_text = f"ステップ上限（{final_state['max_steps']}）に到達"
 
@@ -191,7 +220,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None):
         # 最終結果を抽出
         result_text = ""
         if final_state["status"] == "done":
-            result_text = _stamp_result(_extract_done_text(final_state["history"]))
+            result_text = _finalize_result(final_state)
         elif final_state["status"] == "error":
             result_text = f"ステップ上限（{final_state['max_steps']}）に到達"
 
@@ -290,19 +319,19 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str):
 
         # 最終的にfinal_stateからDONEを抽出してyieldする
         if final_state and final_state["status"] == "done":
-            done_text = _extract_done_text(final_state["history"])
+            done_text = _finalize_result(final_state)
             if done_text:
                 yield {
                     "step": final_state["step_count"],
                     "status": "done",
                     "role": "final",
-                    "done": _stamp_result(done_text),
+                    "done": done_text,
                 }
 
         if final_state:
             result_text = ""
             if final_state["status"] == "done":
-                result_text = _stamp_result(_extract_done_text(final_state["history"]))
+                result_text = _finalize_result(final_state)
 
             finish_execution(
                 exec_id, final_state["status"],

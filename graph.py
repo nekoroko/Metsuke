@@ -587,12 +587,6 @@ def correct_step(state: AgentState) -> AgentState:
     needs_revision を「critic へ」の意味で使っているので、ここでも
     それに合わせ、訂正が必要なときだけ running にして react へ戻す。
     """
-    if state.get("correction_count", 0) >= state.get("max_corrections", 2):
-        return {**state, "status": "needs_revision"}
-    if state["max_steps"] - state["step_count"] <= 1:
-        # 差し戻す予算がないので、そのまま critic へ送る
-        return {**state, "status": "needs_revision"}
-
     done_content = _extract_done(state["history"])
     if not done_content:
         return {**state, "status": "needs_revision"}
@@ -612,6 +606,8 @@ def correct_step(state: AgentState) -> AgentState:
                 "content": f"（自動訂正チェック）実行に失敗したため数値の照合は未実施です: {e}",
             }],
             "status": "needs_revision",
+            "verification_notes": state.get("verification_notes", [])
+            + [f"数値の機械照合を実行できませんでした: {e}"],
             "correction_count": state.get("correction_count", 0) + 1,
         }
 
@@ -641,6 +637,26 @@ def correct_step(state: AgentState) -> AgentState:
         return {
             **state,
             "status": "needs_revision",
+            "correction_count": state.get("correction_count", 0) + 1,
+        }
+
+    # 差し戻せるかどうかは予算次第。差し戻せない場合でも検証は済んでいるので、
+    # 結果を捨てずに verification_notes へ残し、最終回答に注記として出す。
+    #
+    # 以前は予算が尽きていると検証自体をスキップしていたが、それでは
+    # 「最後に出力される回答こそ検証されない」という逆の構造になっていた。
+    # 実測で、ステップ上限際で出力された回答に、履歴に存在しない数値
+    # （売上構成比20%以上など）が含まれたまま素通りしている。
+    can_retry = (
+        state.get("correction_count", 0) < state.get("max_corrections", 2)
+        and state["max_steps"] - state["step_count"] > 1
+    )
+
+    if not can_retry:
+        return {
+            **state,
+            "status": "needs_revision",
+            "verification_notes": state.get("verification_notes", []) + issues,
             "correction_count": state.get("correction_count", 0) + 1,
         }
 

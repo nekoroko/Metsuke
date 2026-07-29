@@ -517,5 +517,110 @@ class TestFindingsBudget(unittest.TestCase):
         few = [{"kind": "number", "raw": "83兆ウォン", "context": "コンセンサス", "source": "q"}]
         self.assertIn("83兆ウォン", numeric.format_findings(few))
 
+
+class TestKoreanNumbers(unittest.TestCase):
+    """
+    韓国語表記の数値。エージェントは対象国の言語で検索することがあり、
+    実測（exec f7cc0de3）では NAVER金融・韓国メディアから得た数値が
+    まるごと抽出できておらず、株価の暴落(-14.65%)が台帳に載らなかった。
+    """
+
+    def test_퍼센트と마이너스を解釈する(self):
+        got = numeric.extract_numbers("전일대비 하락 266,000 마이너스 14.65 퍼센트")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["unit"], "%")
+        self.assertAlmostEqual(got[0]["value"], -14.65)
+
+    def test_조억원の複合表記を解釈する(self):
+        got = numeric.extract_numbers("매출을 78조9680억원, 영업이익을 61조350억원으로 전망")
+        self.assertEqual([n["raw"] for n in got], ["78조9680억원", "61조350억원"])
+        self.assertAlmostEqual(got[0]["value"], 78.968e12)
+        self.assertAlmostEqual(got[1]["value"], 61.035e12)
+
+    def test_원をウォンとして正規化する(self):
+        self.assertEqual(numeric.extract_numbers("1조원")[0]["unit"], "ウォン")
+
+    def test_言語をまたいで照合できる(self):
+        kr = numeric.extract_numbers("영업이익을 61조350억원으로 전망")
+        jp = numeric.extract_numbers("営業利益は61兆350億ウォンの予想")[0]
+        self.assertTrue(numeric.matches_any(jp, kr))
+
+
+class TestFinalAnswerAlwaysChecked(unittest.TestCase):
+    """
+    ステップ上限際で出力された最終回答も検証すること。
+
+    以前は残りステップが1以下だと correct が検証自体をスキップしており、
+    「最後に出力される＝実際に読まれる回答こそ検証されない」という
+    逆の構造になっていた。実測（exec f7cc0de3）で、履歴に存在しない
+    「売上構成比20%以上」が素通りしている。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph, executor
+        from state import make_initial_state
+        from numeric import collect_from_text, merge_findings
+        self.graph = graph
+        self.executor = executor
+
+        result = "SK하이닉스 -9.35% 하락. 매출 78조9680억원 전망."
+        led = merge_findings([], collect_from_text(result, source="web_search(x)", step=1))
+        self.state = make_initial_state("株価動向")
+        self.state["step_count"] = 9          # 残り1。以前はここでスキップしていた
+        self.state["findings"] = led
+        self.state["history"] = [
+            {"role": "result", "content": result},
+            {"role": "assistant", "content":
+                "DONE: 売上構成比の20%以上を占めます。直近は-9.35%の下落です。"},
+        ]
+
+    def test_予算切れでも検証してメモを残す(self):
+        out = self.graph.correct_step(self.state)
+        self.assertEqual(out["status"], "needs_revision", "差し戻してはいけない")
+        notes = out.get("verification_notes", [])
+        self.assertTrue(notes, "検証メモが残っていない")
+        self.assertTrue(any("20%" in n for n in notes))
+
+    def test_履歴にある数値は指摘しない(self):
+        out = self.graph.correct_step(self.state)
+        joined = " ".join(out.get("verification_notes", []))
+        self.assertNotIn("「-9.35%」は検索結果", joined)
+
+    def test_メモが最終回答に出る(self):
+        out = self.graph.correct_step(self.state)
+        final = self.executor._finalize_result(out)
+        self.assertIn("自動検証で確認できなかった点", final)
+        self.assertIn("20%", final)
+
+    def test_問題がなければ注記は付かない(self):
+        self.state["history"][-1] = {
+            "role": "assistant", "content": "DONE: 直近は-9.35%の下落です。"}
+        out = self.graph.correct_step(self.state)
+        self.assertEqual(out.get("verification_notes", []), [])
+        self.assertNotIn("自動検証で確認できなかった点",
+                         self.executor._finalize_result(out))
+
+
+class TestReviewerConstraints(unittest.TestCase):
+    """レビュアーが結論や物語構造を指示しないこと"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import reviewers
+        self.prompt = reviewers.FACT_CHECKER_PROMPT
+
+    def test_結論の方向を指示させない(self):
+        self.assertIn("結論の方向", self.prompt)
+        self.assertIn("指示してはいけない", self.prompt)
+
+    def test_物語を求めさせない(self):
+        for word in ("ストーリー", "対比構造", "説得力"):
+            self.assertIn(word, self.prompt)
+        self.assertIn("報告書であって物語ではない", self.prompt)
+
+    def test_根拠のない記述は削除を指示させる(self):
+        self.assertIn("加筆ではなく削除", self.prompt)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
