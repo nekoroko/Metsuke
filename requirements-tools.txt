@@ -1,20 +1,27 @@
 # requirements-tools.txt — 「ツール実行時ランタイム」のライブラリ集合
 #
 # AIが生成するツールコード（Type1）が使ってよいライブラリの唯一の定義。
-# ai_creator.py の CREATOR_PROMPT がAIに提示している一覧と対応させること。
+# ここに書いた内容が、以下すべてに自動的に反映される。
 #
-# この集合は以下の2箇所で同一に保つ必要がある:
-#   - Containerfile        … サンドボックス（プレビュー実行）用イメージ
-#   - ホストのvenv         … 検証済みツールの直接実行（executor.run_tool）
+#   - サンドボックスイメージ（Containerfile が読み込む）
+#   - ホストのvenv（requirements.txt が -r で読み込む）
+#   - AIに提示する許可リスト（ai_creator.py がこのファイルから生成する）
 #
-# requirements.txt から -r で読み込まれるため、ホスト側は
-# `pip install -r requirements.txt` だけで両方揃う。
+# 以前は許可リストが ai_creator.py の CREATOR_PROMPT / FIX_PROMPT にも
+# 散文でハードコードされており、ライブラリを1つ足すのに3箇所を直す必要があった。
+# どれか忘れると「AIは使ってよいと思っているのにイメージに入っていない」
+# （またはその逆）が起きるため、定義をここに集約している。
 #
-# 定義が分かれていると「プレビューは通ったのにホストで落ちる」
-# （またはその逆）が構造的に発生するため、必ずここに集約する。
+# 行末の「# ...」はAIへの説明文として使われる。
+# 内容を変更すると、次回のサンドボックス実行時に自動で再ビルドされる
+# （ハッシュはパッケージ指定のみから取るため、説明文だけの変更では再ビルドしない）。
+#
+# ホスト側のvenvには反映されないので、追加した場合は別途
+#   pip install -r requirements.txt
+# を実行すること。
 
-ddgs
-requests
-beautifulsoup4
-pandas
-numpy
+ddgs             # DuckDuckGo検索
+requests         # HTTPアクセス
+beautifulsoup4   # HTML解析、bs4としてimport
+pandas           # データ処理・集計
+numpy            # 数値計算

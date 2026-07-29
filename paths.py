@@ -17,7 +17,9 @@
 
 import os
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# リポジトリのルート。Containerfileのビルドコンテキストや
+# requirements-tools.txt の解決にも使う。
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 実行時のCWDに依存させないため、このファイルの位置を基準にした絶対パスにする
-DB_PATH = os.environ.get("AGENT_STUDIO_DB") or os.path.join(_BASE_DIR, "agent_studio.db")
+DB_PATH = os.environ.get("AGENT_STUDIO_DB") or os.path.join(BASE_DIR, "agent_studio.db")

@@ -4,6 +4,7 @@ import sys
 import os
 from config import get_llm, extract_text_content, invoke_with_retry
 from db import add_ai_session, finish_ai_session
+from tool_runtime import format_for_prompt, format_inline
 
 # agent-projectからreviewersをimportするためのパス追加
 AGENT_PROJECT_PATH = os.path.expanduser("~/agent-project")
@@ -11,16 +12,11 @@ if AGENT_PROJECT_PATH not in sys.path:
     sys.path.insert(0, AGENT_PROJECT_PATH)
 
 
-CREATOR_PROMPT = (
+CREATOR_PROMPT_TEMPLATE = (
     "あなたはPythonツール作成アシスタントです。\n"
     "ユーザーの要望に基づいて、繰り返し実行可能な固定処理のPythonスクリプトを生成してください。\n\n"
     "## 利用可能なライブラリ\n"
-    "- 標準ライブラリ全般\n"
-    "- ddgs（DuckDuckGo検索）\n"
-    "- requests（HTTPアクセス）\n"
-    "- beautifulsoup4（HTML解析、bs4としてimport）\n"
-    "- pandas, numpy（データ処理）\n"
-    "- 上記以外のライブラリは使用不可\n\n"
+    "{libraries}\n\n"
     "## 重要な制約\n"
     "- **ダミーデータやサンプルデータをコードにハードコードしてはいけません**。\n"
     "  - 例：ニュース記事の内容、検索結果、価格、人物情報などをコード内に書き込むこと\n"
@@ -53,11 +49,11 @@ CREATOR_PROMPT = (
     "SUGGESTION: エージェントモードで「(タスクプロンプト)」と登録することを推奨します\n"
 )
 
-FIX_PROMPT = (
+FIX_PROMPT_TEMPLATE = (
     "あなたはPythonコードのデバッグアシスタントです。\n"
     "以下のコードを実行したところエラーが発生しました。エラーを修正した完全なコードを返してください。\n\n"
     "## 利用可能なライブラリ\n"
-    "- 標準ライブラリ全般、ddgs、requests、bs4、pandas、numpy\n\n"
+    "- {libraries}\n\n"
     "## 制約\n"
     "- ダミーデータをハードコードしてはいけません\n"
     "- 修正後のコード全体を返すこと（差分ではなく完全なスクリプト）\n"
@@ -71,6 +67,23 @@ FIX_PROMPT = (
 )
 
 
+def _creator_prompt() -> str:
+    """
+    ツール生成プロンプトを組み立てる。
+
+    利用可能ライブラリの一覧は requirements-tools.txt から生成する。
+    以前はここに散文でハードコードされており、実際にインストールされる
+    ライブラリとAIへの提示内容がズレる余地があった。
+    毎回生成するのは、UIやエディタでの定義変更を再起動なしに反映するため。
+    """
+    return CREATOR_PROMPT_TEMPLATE.format(libraries=format_for_prompt())
+
+
+def _fix_prompt() -> str:
+    """コード修正プロンプトを組み立てる（利用可能ライブラリは同上）"""
+    return FIX_PROMPT_TEMPLATE.format(libraries=format_inline())
+
+
 def generate_tool(prompt: str):
     """
     ユーザーの要望からツールコードを生成する。
@@ -80,7 +93,7 @@ def generate_tool(prompt: str):
     llm = get_llm(temperature=0.1)
 
     messages = [
-        {"role": "system", "content": CREATOR_PROMPT},
+        {"role": "system", "content": _creator_prompt()},
         {"role": "user", "content": prompt},
     ]
 
@@ -183,7 +196,7 @@ def fix_code(original_code: str, error_stdout: str, error_stderr: str,
         )
 
         messages = [
-            {"role": "system", "content": FIX_PROMPT},
+            {"role": "system", "content": _fix_prompt()},
             {"role": "user", "content": user_message},
         ]
 

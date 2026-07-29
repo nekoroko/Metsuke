@@ -15,6 +15,7 @@ from executor import (
 from ai_creator import generate_tool, fix_code
 from scheduler import start as start_scheduler, add_job, remove_job, run_agent_now
 from config import get_current_provider_info
+from sandbox import image_status as sandbox_image_status
 import time
 
 # --- 初期化 ---
@@ -64,7 +65,13 @@ def preview_options(key_prefix: str):
 def preview_and_fix(code: str, key_prefix: str, original_prompt: str = "",
                     network: bool = False, writable: bool = False):
     """プレビュー実行 → エラー表示 → AI修正の共通フロー"""
-    with st.spinner("Podmanで実行中..."):
+    spinner_msg = "Podmanで実行中..."
+    if sandbox_image_status()["state"] in ("missing", "stale"):
+        spinner_msg = (
+            "サンドボックスイメージをビルド中...（初回、および "
+            "requirements-tools.txt 変更後は数分かかります）"
+        )
+    with st.spinner(spinner_msg):
         result = run_preview(code, network=network, writable_workspace=writable)
 
     if result["status"] == "done":
