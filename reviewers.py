@@ -5,7 +5,8 @@ from config import get_llm, extract_text_content, invoke_with_retry
 from datetime import datetime
 from numeric import (
     extract_numbers, find_conversion_pairs, conversion_plausible, matches_any,
-    format_findings,
+    format_findings, forecast_marked_as_actual, untagged_ratio,
+    dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
 )
 
 
@@ -84,6 +85,12 @@ FACT_CHECKER_PROMPT = (
     "- 実行履歴に無い情報の追加を求めないこと。履歴に無いなら、\n"
     "  「確認できなかった」と書かせるのが正しい対応である。\n"
     "- 章立てが揃っていないこと自体は問題ではない。情報が無い章は削らせること。\n"
+    "- 「欠落している」と指摘するときは、その情報が実行履歴や数値一覧の\n"
+    "  どこにあるかを示すこと（例:「Step 4 の検索結果にある」）。\n"
+    "  在り処を示せば、エージェントは再検索せず読み直しで直せる。\n"
+    "- 誤りの削除を求めるときは、正しい値への置き換えまで指示すること。\n"
+    "  削除だけを指示すると、正しい情報ごと消えて回答が痩せる。\n"
+    "  置き換える値が履歴に無い場合は、そう明記すること。\n"
     "\n"
     "## 回答形式\n"
     "VERDICT: OK または NEEDS_REVISION\n"
@@ -348,7 +355,15 @@ def _history_numbers(history: list, sources: list = None) -> list[dict]:
     return numbers
 
 
-def numeric_checker(output: str, history: list = None, sources: list = None) -> dict:
+def _forecast_in_context(history: list, findings: list) -> bool:
+    """取得済みの情報に、予想値であることを示す語が含まれているか。"""
+    texts = [e.get("content", "") for e in (history or []) if e.get("role") == "result"]
+    texts += [f.get("context", "") for f in (findings or [])]
+    return any(w in t for t in texts for w in FORECAST_WORDS)
+
+
+def numeric_checker(output: str, history: list = None, sources: list = None,
+                    findings: list = None, previous_output: str = None) -> dict:
     """
     回答中の数値を、実行履歴と出典から機械的に突き合わせる。LLMは使わない。
 
@@ -358,6 +373,21 @@ def numeric_checker(output: str, history: list = None, sources: list = None) -> 
 
     チェックB: 未照合の数値
         回答中の単位付き数値が、検索結果にも出典にも存在しない場合に指摘する。
+
+    チェックC: 予想を実績として書いていないか
+        [実績] と書かれた数値の出典側の文脈に「予想」「コンセンサス」等が
+        あれば指摘する。実測で、発表前のコンセンサスを実績として書いた事故がある。
+
+    チェックD: 種別タグの欠落
+        単位付き数値に [実績] / [予想] が1つも付いていない場合に指摘する。
+        数値ごとに指摘すると量が増えるため、全体で1件にまとめる。
+
+    チェックF: 符号の食い違い
+        「+5.2%（-1,200円）」のように、変動率と変動額の符号が逆の記述を検出する。
+
+    チェックE: 情報量の後退
+        前回の回答にあり台帳にも裏付けがあった数値が、今回消えていれば指摘する。
+        訂正ループは「消す」方向にしか働かないため、実績値ごと落ちることがある。
 
     LLMに数値照合をさせない理由は docs/accuracy-improvements.md §0.1 を参照。
     実測で、書く側と検証する側の双方が「ありそうな値」へ無意識に正規化していた。
@@ -381,6 +411,40 @@ def numeric_checker(output: str, history: list = None, sources: list = None) -> 
                 f"出典の数値をそのまま書き写すか、この数値を削除してください"
                 f"（該当箇所: …{n['context']}…）。"
             )
+
+    for m in forecast_marked_as_actual(output or "", findings or []):
+        issues.append(
+            f"「{m['raw']}」に [実績] と付いていますが、出典の文脈は予想です"
+            f"（出典: …{m['context'][:60]}…）。[予想] に直すか、"
+            f"実績値を検索して置き換えてください。"
+        )
+
+    untagged, total = untagged_ratio(output or "")
+    if total and untagged == total and _forecast_in_context(history, findings):
+        # タグの欠落を常に差し戻すと、予想と実績の取り違えが起こりえない
+        # タスクでも書式だけのために1ラウンド消える。取得済みの情報に
+        # 「予想」「コンセンサス」等が混ざっているときに限って指摘する。
+        issues.append(
+            f"数値{total}件のいずれにも [実績] / [予想] が付いていません。"
+            f"取得済みの情報には予想値が含まれています。"
+            f"判断できないものは [種別不明] と書き、省略しないでください。"
+        )
+
+    for c in sign_conflicts(output or ""):
+        issues.append(
+            f"符号が食い違っています: 変動率「{c['rate']}」と変動額「{c['amount']}」"
+            f"（該当箇所: …{c['context']}…）。"
+            f"どちらかが誤りです。出典で裏を取るか、"
+            f"「符号不整合のため要確認」と明記してください。"
+        )
+
+    for d in dropped_supported_numbers(previous_output or "", output or "",
+                                       findings or []):
+        issues.append(
+            f"前回の回答にあった「{d['raw']}」が消えています。"
+            f"この数値は取得済みの情報に裏付けがあります。"
+            f"誤りだったのでなければ、書き直しの際に戻してください。"
+        )
 
     return {
         "reviewer": "numeric_checker",
@@ -496,6 +560,8 @@ def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
                     output=kwargs.get("output", ""),
                     history=kwargs.get("history", []),
                     sources=kwargs.get("sources", []),
+                    findings=kwargs.get("findings", []),
+                    previous_output=kwargs.get("previous_output", ""),
                 )
             results.append(result)
         except Exception as e:

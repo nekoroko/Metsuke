@@ -119,6 +119,80 @@ def relevant_excerpt(text: str, keywords: list[str], budget: int = EXCERPT_CHARS
     return "\n".join(out)
 
 
+# 決算・株価タスクで機械的に足すクエリ。LLMの計画は「決算」だけで
+# 終わることが多く、発表前のプレビュー記事（予想）ばかり集まる。
+EARNINGS_WORDS = ("決算", "業績", "営業利益", "純利益", "売上")
+PRICE_WORDS = ("株価", "値動き", "騰落", "株")
+_HAS_ACTUAL_QUERY = ("実績", "結果", "発表", "速報")
+_HAS_SERIES_QUERY = ("推移", "時系列", "チャート")
+
+
+def _subject(task: str) -> str:
+    """タスク文から検索の主語になりそうな語を取り出す。"""
+    return " ".join(_keywords(task)[:2])
+
+
+def reinforce_plan(task: str, items: list[dict]) -> list[dict]:
+    """
+    計画に、取りこぼしがちな観点のクエリを機械的に足す。
+
+    - 決算タスク: 「決算」だけだと予想記事に偏るため「決算 実績」を足す
+    - 株価タスク: 単発のスナップショットで済ませないよう「株価 推移」を足す
+
+    LLMに毎回言い聞かせるとプロンプトが膨らむので、計画の側で担保する。
+    """
+    items = [dict(i) for i in items]
+    queries = " ".join(i.get("query", "") + i.get("question", "") for i in items)
+    subject = _subject(task)
+    if not subject:
+        return items
+
+    additions = []
+    if any(w in task for w in EARNINGS_WORDS) and \
+            not any(w in queries for w in _HAS_ACTUAL_QUERY):
+        additions.append(("発表済みの実績値（予想ではないもの）", f"{subject} 決算 実績"))
+    if any(w in task for w in PRICE_WORDS) and \
+            not any(w in queries for w in _HAS_SERIES_QUERY):
+        additions.append(("直近の株価の推移（単発の値ではなく時系列）", f"{subject} 株価 推移"))
+
+    for question, query in additions:
+        if len(items) >= MAX_ITEMS:
+            break
+        items.append({
+            "id": len(items) + 1, "question": question, "query": query,
+            "status": "open", "hits": [],
+        })
+    return items
+
+
+def needs_result_recheck(state: dict) -> bool:
+    """
+    「◯日に発表予定」の情報を掴んでいるのに、発表結果を調べていない状態か。
+
+    実測で、発表当日のコンセンサス（予想）を実績として書いた事故がある。
+    予定を見つけたなら、結果が出ているかを一度は確かめる。
+    """
+    if not pending_event_warnings(state.get("findings", [])):
+        return False
+    done = " ".join(state.get("queries_done", []))
+    return not any(w in done for w in ("結果", "実績", "速報"))
+
+
+def append_result_item(task: str, items: list[dict]) -> list[dict]:
+    """発表結果を確かめるための調査項目を1件足す。"""
+    items = [dict(i) for i in items]
+    subject = _subject(task)
+    suffix = "決算 結果" if any(w in task for w in EARNINGS_WORDS) else "結果"
+    items.append({
+        "id": len(items) + 1,
+        "question": "発表予定だったものの結果（実績値が出ているか）",
+        "query": f"{subject} {suffix}".strip(),
+        "status": "open",
+        "hits": [],
+    })
+    return items
+
+
 def _sources_section(sources: list[dict]) -> str:
     """取得済みページの抜粋を、予算内でプロンプト用に整形する。"""
     if not sources:
@@ -222,6 +296,8 @@ def plan_step(state: AgentState) -> AgentState:
         items = [{"id": 1, "question": state["task"][:120],
                   "query": " ".join(_keywords(state["task"])[:3]) or state["task"][:40],
                   "status": "open", "hits": []}]
+
+    items = reinforce_plan(state["task"], items)
 
     plan_text = "調査計画:\n" + "\n".join(
         f"{i['id']}. {i['question']}（クエリ: {i['query']}）" for i in items
@@ -365,6 +441,18 @@ def gap_step(state: AgentState) -> AgentState:
     items = [dict(i) for i in state.get("plan_items", [])]
     rnd = state.get("research_round", 0) + 1
     open_items = [i for i in items if i["status"] == "open"]
+
+    # 「◯日に発表予定」を掴んでいるのに結果を調べていないなら、
+    # LLMの判定を待たずに1ラウンド使って確認する。予想値を実績として
+    # 書く事故は、ここを飛ばしたときに起きている。
+    if rnd < state.get("max_rounds", 3) and needs_result_recheck(state):
+        return _with_trace(state, {
+            **state,
+            "plan_items": append_result_item(state["task"], items),
+            "research_round": rnd,
+            "status": "running",
+        }, "gap", "発表予定を検知。結果を確認しに戻る", "search",
+            note="予定の情報があるのに、結果・実績を調べていない")
 
     if not open_items:
         return _with_trace(state, {**state, "research_round": rnd},

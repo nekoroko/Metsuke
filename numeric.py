@@ -95,7 +95,11 @@ def extract_numbers(text: str) -> list[dict]:
     単位付きの数値を抽出する。
 
     戻り値の各要素:
-      {"raw": "83兆ウォン", "value": 8.3e13, "unit": "ウォン", "context": "…"}
+      {"raw": "83兆ウォン", "value": 8.3e13, "unit": "ウォン", "context": "…",
+       "start": 12, "end": 17}
+
+    start / end は元テキスト上の位置。数値の直後に置かれた [実績] / [予想] の
+    タグを読むために使う（tag_after）。
     """
     if not text:
         return []
@@ -107,6 +111,8 @@ def extract_numbers(text: str) -> list[dict]:
                                m.group("n2"), m.group("s2")),
             "unit": normalize_unit(m.group("unit")),
             "context": _context(text, *m.span()),
+            "start": m.start(),
+            "end": m.end(),
         })
     return out
 
@@ -338,4 +344,153 @@ def unused_numbers(answer: str, findings: list) -> list[dict]:
             continue
         if not matches_any(parsed[0], used):
             out.append(f)
+    return out
+
+
+# ===== 予想と実績の取り違え、種別タグ、情報量の後退 =====
+
+# 出典側が「これは予想である」と書いているときに現れる語。
+# 韓国語ソースも扱うため、전망（見通し）・예상（予想）も入れる。
+FORECAST_WORDS = (
+    "予想", "見通し", "見込み", "コンセンサス", "予測", "ガイダンス",
+    "推定", "計画", "目標", "전망", "예상", "컨센서스",
+)
+
+ACTUAL_TAG = "[実績]"
+FORECAST_TAG = "[予想]"
+UNKNOWN_TAG = "[種別不明]"
+_TAGS = (ACTUAL_TAG, FORECAST_TAG, UNKNOWN_TAG)
+
+# 数値に付いた種別タグを見る範囲。「営業利益は9.2兆ウォン [実績]（…）」の
+# ように、単位のすぐ後ろに置かれることを想定している。
+TAG_LOOKAHEAD = 24
+
+
+def tag_after(text: str, end: int) -> str:
+    """数値の直後にある種別タグを返す。無ければ空文字。"""
+    window = (text or "")[end:end + TAG_LOOKAHEAD]
+    for tag in _TAGS:
+        if tag in window:
+            return tag
+    return ""
+
+
+# 文の区切り。小数点（9.35）で切ってしまわないよう、半角ピリオドは
+# 前後が数字でない場合だけ区切りとみなす。
+_SENTENCE_SPLIT = re.compile(r"(?:[。！？!?\n]+|(?<!\d)[.．](?!\d))")
+
+
+def sentence_containing(context: str, token: str) -> str:
+    """
+    文脈のうち、その数値が入っている文だけを返す。
+
+    「-9.35% 하락. 매출 78조9680억원 전망.」のように、1つの文脈に
+    実績と予想が同居することがある。文脈全体で「予想」を判定すると、
+    隣の文の「전망」に引きずられて実績値を予想と誤判定する。
+    """
+    if not context:
+        return ""
+    for part in _SENTENCE_SPLIT.split(context):
+        if token and token in part:
+            return part
+    return context
+
+
+def _finding_context(entry: dict, findings: list) -> str:
+    """回答中の数値に対応する台帳エントリの文脈を返す。"""
+    for f in findings or []:
+        if f.get("kind") != "number":
+            continue
+        parsed = extract_numbers(f.get("raw", ""))
+        if parsed and matches_any(entry, parsed):
+            return f.get("context", "")
+    return ""
+
+
+def forecast_marked_as_actual(answer: str, findings: list) -> list[dict]:
+    """
+    [実績] と書かれているが、出典側の文脈は予想だった数値を返す。
+
+    実測で、証券会社のコンセンサス（発表前の予想）を実績値として
+    レポートに書いた事故が起きている。タグを付ける運用にした以上、
+    タグと出典の食い違いは機械的に拾える。
+    """
+    out = []
+    for n in extract_numbers(answer or ""):
+        if tag_after(answer, n["end"]) != ACTUAL_TAG:
+            continue
+        context = _finding_context(n, findings)
+        if not context:
+            continue
+        # 同じ文脈に実績と予想が同居することがあるため、その数値が
+        # 入っている文だけを見る
+        segment = sentence_containing(context, n["raw"])
+        if any(w in segment for w in FORECAST_WORDS):
+            out.append({"raw": n["raw"], "context": segment})
+    return out
+
+
+def untagged_ratio(answer: str) -> tuple:
+    """(タグの無い数値の数, 単位付き数値の総数) を返す。"""
+    numbers = extract_numbers(answer or "")
+    if not numbers:
+        return (0, 0)
+    untagged = [n for n in numbers if not tag_after(answer, n["end"])]
+    return (len(untagged), len(numbers))
+
+
+def dropped_supported_numbers(previous: str, current: str, findings: list) -> list[dict]:
+    """
+    前回の回答にあり、台帳にも裏付けがあるのに、今回の回答から消えた数値を返す。
+
+    訂正ループは「間違いを消す」方向にしか働かないため、指摘に応じた
+    書き直しで実績値ごと落ちることがある。情報量が減る訂正は、
+    それ自体を悪化として扱えるようにする。
+    """
+    if not previous or not current:
+        return []
+    now = extract_numbers(current)
+    out = []
+    for n in extract_numbers(previous):
+        if matches_any(n, now):
+            continue
+        if not _finding_context(n, findings):
+            continue                      # 台帳に裏付けが無い数値は消えて正しい
+        out.append({"raw": n["raw"], "context": n["context"]})
+    return out
+
+
+_SIGNED_RE = re.compile(r"^(?:[-−▲△]|마이너스|マイナス)")
+_PLUS_RE = re.compile(r"^\+")
+
+
+def _sign_of(raw: str) -> int:
+    """明示的な符号だけを見る。符号の無い数値は0を返す。"""
+    if _SIGNED_RE.match(raw or ""):
+        return -1
+    if _PLUS_RE.match(raw or ""):
+        return 1
+    return 0
+
+
+def sign_conflicts(text: str) -> list[dict]:
+    """
+    同じ文の中で、変動率と変動額の符号が食い違っている箇所を返す。
+
+    「+5.2%（-1,200円）」のように、率がプラスで額がマイナスというデータは
+    どちらかが誤っている。株価サイトのスクレイプでは実際に混入する。
+
+    「前日比 -3.2%、年初来 +12%」のように率同士で符号が違うのは正常なので、
+    率（%）と通貨額のペアに限って見る。
+    """
+    out = []
+    for sentence in _SENTENCE_SPLIT.split(text or ""):
+        nums = extract_numbers(sentence)
+        rates = [n for n in nums if n["unit"] == "%" and _sign_of(n["raw"])]
+        amounts = [n for n in nums if n["unit"] != "%" and _sign_of(n["raw"])]
+        for r in rates:
+            for a in amounts:
+                if _sign_of(r["raw"]) != _sign_of(a["raw"]):
+                    out.append({"rate": r["raw"], "amount": a["raw"],
+                                "context": sentence.strip()[:60]})
     return out

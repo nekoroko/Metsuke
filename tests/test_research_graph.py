@@ -91,7 +91,9 @@ class TestPlanStep(unittest.TestCase):
             "1. 直近四半期の営業利益 | SKハイニックス 決算 実績\n"
             "2. 直近1週間の株価 | SKハイニックス 株価\n"
         )
-        out = gr.plan_step(_state())
+        # 決算・株価タスクは reinforce_plan が項目を足すため、
+        # ここでは補強の対象にならないタスクでパースだけを見る
+        out = gr.plan_step(_state(task="東京の人口推計"))
         self.assertEqual(len(out["plan_items"]), 2)
         self.assertEqual(out["plan_items"][0]["query"], "SKハイニックス 決算 実績")
         self.assertEqual(out["plan_items"][0]["status"], "open")
@@ -99,7 +101,7 @@ class TestPlanStep(unittest.TestCase):
 
     def test_falls_back_to_task_when_unparseable(self):
         gr._ask = lambda *a, **k: "承知しました。まず調査を始めます。"
-        out = gr.plan_step(_state())
+        out = gr.plan_step(_state(task="東京の人口推計"))
         self.assertEqual(len(out["plan_items"]), 1)
         self.assertTrue(out["trace"][-1]["skipped"])
 
@@ -107,7 +109,7 @@ class TestPlanStep(unittest.TestCase):
         def boom(*a, **k):
             raise RuntimeError("接続エラー")
         gr._ask = boom
-        out = gr.plan_step(_state())
+        out = gr.plan_step(_state(task="東京の人口推計"))
         self.assertEqual(out["status"], "running")
         self.assertEqual(len(out["plan_items"]), 1)
         self.assertIn("接続エラー", out["trace"][-1]["note"])
@@ -355,3 +357,77 @@ class TestGraphRegistry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlanReinforcement(unittest.TestCase):
+    """計画に、取りこぼしがちな観点を機械的に足す"""
+
+    def test_earnings_task_gets_actual_query(self):
+        items = [{"id": 1, "question": "決算", "query": "SKハイニックス 決算",
+                  "status": "open", "hits": []}]
+        out = gr.reinforce_plan("SKハイニックスの決算を調べて", items)
+        self.assertEqual(len(out), 2)
+        self.assertIn("実績", out[1]["query"])
+
+    def test_no_duplicate_when_plan_already_covers_it(self):
+        items = [{"id": 1, "question": "決算", "query": "SKハイニックス 決算 実績",
+                  "status": "open", "hits": []}]
+        self.assertEqual(len(gr.reinforce_plan("SKハイニックスの決算", items)), 1)
+
+    def test_price_task_gets_time_series_query(self):
+        items = [{"id": 1, "question": "株価", "query": "SKハイニックス 株価",
+                  "status": "open", "hits": []}]
+        out = gr.reinforce_plan("SKハイニックスの株価を調べて", items)
+        self.assertTrue(any("推移" in i["query"] for i in out))
+
+    def test_unrelated_task_is_untouched(self):
+        items = [{"id": 1, "question": "天気", "query": "東京 天気",
+                  "status": "open", "hits": []}]
+        self.assertEqual(gr.reinforce_plan("東京の天気", items), items)
+
+    def test_does_not_exceed_item_cap(self):
+        items = [{"id": i, "question": "q", "query": "決算 q", "status": "open", "hits": []}
+                 for i in range(1, gr.MAX_ITEMS + 1)]
+        self.assertEqual(len(gr.reinforce_plan("決算と株価を調べて", items)), gr.MAX_ITEMS)
+
+
+class TestResultRecheck(unittest.TestCase):
+    """発表予定を掴んだら、結果が出ているかを必ず一度確認する"""
+
+    def _pending_state(self, **over):
+        findings = [{"kind": "date", "raw": "7月29日",
+                     "context": "29日に第2四半期決算の発表を控える", "source": "web_search(x)"}]
+        return _state(findings=findings, plan_items=[
+            {"id": 1, "question": "決算", "query": "SKハイニックス 決算",
+             "status": "filled", "hits": []},
+        ], **over)
+
+    def test_detects_missing_result_query(self):
+        self.assertTrue(gr.needs_result_recheck(self._pending_state()))
+
+    def test_satisfied_once_result_query_ran(self):
+        s = self._pending_state(queries_done=["SKハイニックス 決算 結果"])
+        self.assertFalse(gr.needs_result_recheck(s))
+
+    def test_no_pending_event_no_recheck(self):
+        self.assertFalse(gr.needs_result_recheck(_state()))
+
+    def test_gap_loops_back_without_calling_llm(self):
+        orig = gr._ask
+        gr._ask = lambda *a, **k: self.fail("結果確認の差し戻しでLLMは呼ばない")
+        try:
+            out = gr.gap_step(self._pending_state())
+        finally:
+            gr._ask = orig
+        self.assertEqual(gr.route_after_gap(out), "search")
+        self.assertTrue(any("結果" in i["query"] for i in out["plan_items"]))
+
+    def test_round_limit_still_wins(self):
+        s = self._pending_state(research_round=2, max_rounds=3)
+        orig = gr._ask
+        gr._ask = lambda *a, **k: self.fail("上限到達時はLLMを呼ばない")
+        try:
+            out = gr.gap_step(s)
+        finally:
+            gr._ask = orig
+        self.assertEqual(gr.route_after_gap(out), "compose")

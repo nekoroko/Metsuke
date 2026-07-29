@@ -32,19 +32,24 @@ _SEARCH_0 = '## 検索クエリの組み立て方（重要）\nweb_search や su
 _SEARCH_1 = '## 調査タスクの推奨フロー\n1. 最初に suggest_keywords でメインキーワード（1〜2語）のサジェストを取得\n2. サジェストから複数の観点を選び、それぞれ2〜3語のクエリで web_search を実行\n3. 必要に応じて fetch_url で記事本文を確認\n4. 集めた情報を統合してDONEで回答\n\n公式サイトのプレスリリースだけに頼らず、サジェストから世間の関心事を捉えること。\n'
 _SEARCH_2 = '## 保存済みツール（Type1）の活用\nタスクに「ツールID xxxを実行」「保存済みの○○ツールで前処理」といった指示がある場合、\nまたは定型的な前処理が必要な場合は、run_saved_tool を活用してください。\n利用可能なツールが分からない時は list_saved_tools で一覧を取得できます。\n'
 _SEARCH_3 = '## 出典の選び方\n- 決算・業績・財務の数値は、**企業の公式発表（IR）や主要な経済メディア**を\n  優先すること。株価情報サイトや集計サイトのスニペットだけを根拠にしないこと。\n- 集計サイト（株価ポータル、まとめサイト等）の数値しか得られていない場合は、\n  「一次情報未確認」と明記すること。\n- アナリスト評価・センチメントスコア・掲示板の強気弱気比率などを引用する場合は、\n  **「個人投資家向けサイトの集計値（参考値）」であることを必ず併記**すること。\n  これらは公式の格付けや専門機関の評価とは別物である。\n'
-_SEARCH_4 = '## 決算・業績を調べるときの手順\n「決算」「業績」を扱うタスクでは、予想と実績の両方を探すこと。\n「（対象名） 決算」だけで終わらせず、**「（対象名） 決算 実績」または\n「（対象名） 決算 発表」でも最低1回は検索する**こと。\n「決算」だけで検索すると発表前のプレビュー記事（予想）ばかりが集まり、\n予想値を実績値と取り違える原因になる。\n'
+_SEARCH_4 = '## 決算・業績を調べるときの手順\n「決算」「業績」を扱うタスクでは、予想と実績の両方を探すこと。\n「（対象名） 決算」だけで終わらせず、**「（対象名） 決算 実績」または\n「（対象名） 決算 発表」でも最低1回は検索する**こと。\n「決算」だけで検索すると発表前のプレビュー記事（予想）ばかりが集まり、\n予想値を実績値と取り違える原因になる。\n発表当日は予想記事が上位に出やすいため、DONEを書く前に\n「（対象名） 決算 結果」でも一度確認すること。\n'
+
 _SEARCH_5 = '## 検索結果を評価する際の注意\n直前の検索結果を受け取ったら、次のクエリを考える前に、\nまず「タスクに必要な情報のうち、何がまだ埋まっていないか」を\nTHOUGHT内で明示的に言語化すること。\nその上で、その不足点をピンポイントで埋めるクエリを組み立てること。\n「なんとなく違う言い回しで検索し直す」ことは避けること。\n検索結果の要約（スニペット）だけで数値が読み取れない場合は、\nfetch_urlで該当ページの本文を取得すること。\n'
 
 # 執筆中だけ入れる（検索している間は不要）
 _WRITE_0 = '## 数値には出所と種別を必ず付ける\n- すべての数値に **[実績]** か **[予想]** のどちらかを付けること。\n  どちらか判断できない場合は **[種別不明]** と書くこと。省略しないこと。\n  例: 売上高 84.1兆ウォン [予想]（証券14社コンセンサス、2026年7月29日発表予定）\n- 「コンセンサス」「見通し」「見込み」「予想」と書かれた数値は必ず [予想] である。\n  これを実績のように書くことは重大な誤りである。\n- **株価・騰落率には必ず「いつ時点か」と「どの市場か」を併記すること。**\n  例: -8.81%（NASDAQ上場ADR SKHY、2026年7月28日終値）\n  時点が分からない株価データは、「時点不明」と明記するか、採用しないこと。\n- **同じ企業が複数の市場に上場している場合、市場と通貨を分けて書くこと。**\n  例: 韓国取引所 000660.KS（ウォン建て）と NASDAQ ADR SKHY（ドル建て）は別物である。\n  異なる市場・通貨の数値を、断りなく同じ項目に並べてはいけない。\n- 出典を書くときは、その数値を実際に取得したページを書くこと。\n  上の一覧には数値ごとの取得元が併記されているので、それと食い違わせないこと。\n'
 _WRITE_1 = '## 情報が足りないとき\n「直近1週間」「最近」等の条件を満たす情報が集まらなかった場合、\n「見つかりませんでした」と書く前に、**期間を明示したクエリで最低1回は再検索**する\nこと（例:「（対象名） 株価 今週」「（対象名） 7月28日」）。\n再検索しても不足する場合に限り、何がどこまで確認できたのかを具体的に書くこと。\n「情報は限定的でした」とだけ書いて終えないこと。\n'
-_WRITE_2 = '## DONEを出す前の点検\n「これまでに取得した数値・日付」の一覧を上から1件ずつ確認し、\nタスクの問いに関係するものを回答に含めたか点検すること。\n特に、増減率・価格・日付など、結論の向きを左右する数値を\n取りこぼしていないか確認すること。\n「情報が見つからなかった」と書く前に、この一覧に該当する数値が\n無いか必ず確認すること。一覧にある数値を使わずに「不明」と書くのは誤りである。\n'
+_WRITE_2 = '## DONEを出す前の点検（省略しないこと）\n以下を1件ずつ確認し、1つでも「いいえ」があれば書き直すか追加調査すること。\n1. 「これまでに取得した数値・日付」の一覧に、まだ回答へ反映していない\n   実績値・株価の急変・重大なニュースが残っていないか。\n   一覧にある数値を使わずに「不明」「確認できず」と書くのは誤りである。\n2. 予想値を実績値として書いていないか。\n3. 採用した株価より新しい株価が、一覧の中に無いか。\n4. 通貨・市場・ティッカーを取り違えていないか。\n5. 書いた「材料」「理由」は、実際に検索結果に書かれていたことか。\n   一般論や推測で埋めた段落があれば、書き足すのではなく削ること。\n'
+
 _WRITE_3 = '## 表記ルール\n- 「予想」「見通し」「ガイダンス」と「実績」を明確に区別すること\n- 数値には必ず時点（例：2026年5月15日発表）を付記すること\n- 順位・比較情報には観測日を付記すること（例：2026年6月12日時点で首位）\n- 検索結果から実際に得られた情報のみを使い、推測で補完しないこと\n- **複数の検索結果で同じトピックについて異なる情報が出てきた場合、日付を比較して\n  最も新しい情報を採用すること。** 状況が良化・悪化している対象は特に注意すること\n  （例：「業績悪化」の記事と「過去最高益」の記事が両方出てきたら、日付が新しい方を信じる）\n'
 _WRITE_4 = '## 期間の要求を満たしているか確認する\nタスクが「直近◯◯以内」のように期間を指定している場合、\nDONEを出す前に、使おうとしている情報の日付が実際にその期間内に\n収まっているか必ず確認すること。今日の日付から逆算して確認すること。\n収まっていない情報しかない場合は、「◯◯時点の情報が最新（直近◯◯以内の\nデータは見つからず）」と明記した上で、より新しい情報を探すクエリで\n再検索すること。古い情報を、あたかも直近の情報であるかのように\n書かないこと。\n'
 _WRITE_5 = '## 同じ内容を繰り返し生成しない\n1回の応答につき、THOUGHTとACTION（またはDONE）はそれぞれ1回だけ\n書くこと。一度ACTION: generate_codeやACTION: tool_name(...)を書いたら、\n同じ回答の中でもう一度別のACTIONを書き直したり、同じ内容を形を変えて\n繰り返したりしないこと。DONEを出す場合も同様で、直前に別のACTIONで\n書いた内容をDONEの本文にそのまま書き写す必要はない。すでに結論が\n出ているなら、それ以上検討し直さず、そのままDONEで終えること。\n'
 
+_SEARCH_6 = '## 株価を調べるときの手順\n「直近1週間」等の値動きを問われた場合、単発の株価1点で済ませないこと。\n日次の時系列（クエリ例:「（対象名） 株価 推移」「（対象名） 株価 時系列」）を\n取得し、急騰・急落・高値安値の更新があれば必ず回答に反映すること。\n「いつ時点か」「どの市場・通貨か」が分からない株価は採用しないこと。\n'
+
 SECTIONS_ALWAYS = [_ALWAYS_0, _ALWAYS_1, _ALWAYS_2]
-SECTIONS_SEARCH = [_SEARCH_0, _SEARCH_1, _SEARCH_2, _SEARCH_3, _SEARCH_4, _SEARCH_5]
+SECTIONS_SEARCH = [_SEARCH_0, _SEARCH_1, _SEARCH_2, _SEARCH_3, _SEARCH_4, _SEARCH_5,
+                   _SEARCH_6]
 SECTIONS_WRITE = [_WRITE_0, _WRITE_1, _WRITE_2, _WRITE_3, _WRITE_4, _WRITE_5]
 # 「不完全な日付を勝手に補完しない」は現在の月を埋め込むため、
 # 定数ではなく build_system_prompt 内で生成する。
@@ -626,6 +631,22 @@ def _extract_done(history: list) -> str:
     return ""
 
 
+def _extract_previous_done(history: list) -> str:
+    """
+    1つ前の版の最終回答を返す。
+
+    訂正のたびに新しいDONEが積まれるので、直前の版と比べれば
+    「訂正の結果、正しい数値まで落ちた」ことを検出できる。
+    """
+    seen = 0
+    for entry in reversed(history or []):
+        if entry.get("role") == "assistant" and "DONE:" in entry.get("content", ""):
+            seen += 1
+            if seen == 2:
+                return entry["content"].split("DONE:")[1].strip()
+    return ""
+
+
 def correct_step(state: AgentState) -> AgentState:
     """
     DONEの内容を機械チェックにかけ、数値の誤りがあれば訂正を差し戻す。
@@ -649,6 +670,8 @@ def correct_step(state: AgentState) -> AgentState:
             output=done_content,
             history=state["history"],
             sources=state.get("sources", []),
+            findings=state.get("findings", []),
+            previous_output=_extract_previous_done(state["history"]),
         )
     except Exception as e:
         # 機械チェックの失敗でループを止めない。ただし黙って通さず履歴に残す
@@ -720,6 +743,14 @@ def correct_step(state: AgentState) -> AgentState:
     feedback += "\n".join(f"- {i}" for i in issues)
     if instruction:
         feedback += f"\n\n{instruction}"
+    # 置き換え先の候補を一緒に渡す。「消せ」だけを伝えると、正しい値ごと
+    # 落ちて回答が痩せる（訂正の結果、実績値が消えて予想値だけ残った実測がある）。
+    ledger = format_findings(state.get("findings", []), char_budget=700)
+    if ledger:
+        feedback += (
+            "\n\n取得済みの数値（この中に正しい値があれば、削除ではなく"
+            "置き換えに使うこと）:\n" + ledger
+        )
     feedback += "\n訂正した上で、再度DONEで最終回答を出してください。"
 
     return _with_trace(state, {
@@ -738,13 +769,6 @@ def critic_step(state: AgentState) -> AgentState:
             note=f"レビューの予算切れ（{state['critique_count']}/{state['max_critiques']}）",
             skipped=True)
 
-    remaining_steps = state["max_steps"] - state["step_count"]
-    if remaining_steps <= 1:
-        # 差し戻す予算がないため、そのままdoneにする
-        return _with_trace(state, {**state, "status": "done"},
-            "critic", "スキップ", "END",
-            note=f"差し戻すステップ予算がない（残り{remaining_steps}）", skipped=True)
-
     done_content = ""
     for entry in reversed(state["history"]):
         if entry["role"] == "assistant" and "DONE:" in entry["content"]:
@@ -755,6 +779,15 @@ def critic_step(state: AgentState) -> AgentState:
         return _with_trace(state, {**state, "status": "done"},
             "critic", "スキップ", "END",
             note="履歴にDONE本文が見つからない", skipped=True)
+
+    # 差し戻せるステップ予算があるか。無くてもレビュー自体は行う。
+    #
+    # 以前はここで即 done にしていたため、上限際で出した回答こそ
+    # 誰にも読まれずに確定していた。差し戻せないなら、指摘を
+    # verification_notes に残して最終回答の末尾に出す。黙って古い版を
+    # 確定させない。
+    remaining_steps = state["max_steps"] - state["step_count"]
+    can_send_back = remaining_steps > 1
 
     try:
         reviewer_names = dispatch_reviewers(state["task"], done_content, output_type="auto")
@@ -769,6 +802,8 @@ def critic_step(state: AgentState) -> AgentState:
         history=state["history"],
         code=code_for_review,
         findings=state.get("findings", []),
+        sources=state.get("sources", []),
+        previous_output=_extract_previous_done(state["history"]),
     )
 
     aggregated = aggregate_results(review_results)
@@ -779,6 +814,17 @@ def critic_step(state: AgentState) -> AgentState:
             "status": "done",
             "critique_count": state["critique_count"] + 1,
         }, "critic", f"レビュー: OK（{', '.join(reviewer_names)}）", "END")
+
+    if not can_send_back:
+        # 差し戻せないので、指摘を最終回答の注記として残して終える
+        return _with_trace(state, {
+            **state,
+            "status": "done",
+            "critique_count": state["critique_count"] + 1,
+            "verification_notes": state.get("verification_notes", [])
+            + [f"（レビュー未反映）{i}" for i in aggregated["issues"]],
+        }, "critic", f"レビュー: 要修正だが差し戻せず（指摘{len(aggregated['issues'])}件）",
+            "END", note=f"残りステップ{remaining_steps}。注記として最終回答に出す")
 
     feedback_content = "複数のレビュアーから以下の指摘がありました。"
     feedback_content += "指摘を反映してから再度DONEで最終回答を出してください。\n\n"

@@ -148,7 +148,8 @@ class TestNumericCheckerRegression(unittest.TestCase):
                 f"{token} は履歴に存在するのに未照合として指摘されている")
 
     def test_問題がなければOKを返す(self):
-        clean = "売上高は83兆ウォン（約9兆円）、営業利益は64兆ウォン（約7兆円）でした。"
+        clean = ("売上高は83兆ウォン [実績]（約9兆円）、"
+                 "営業利益は64兆ウォン [実績]（約7兆円）でした。")
         r = self.checker(output=clean, history=self.fx["history"])
         self.assertEqual(r["verdict"], "OK", f"誤検出: {r['issues']}")
 
@@ -200,11 +201,25 @@ class TestCorrectNode(unittest.TestCase):
         self.assertIn("9兆ウォン", feedback)
 
     def test_誤りがなければcriticへ進む(self):
-        clean = "売上高は83兆ウォン（約9兆円）、営業利益は64兆ウォン（約7兆円）でした。"
+        clean = ("売上高は83兆ウォン [実績]（約9兆円）、"
+                 "営業利益は64兆ウォン [実績]（約7兆円）でした。")
         self.state["history"][-1] = {"role": "assistant", "content": "DONE: " + clean}
         out = self.graph.correct_step(self.state)
         self.assertEqual(out["status"], "needs_revision")
         self.assertEqual(self.graph.route_after_correct(out), "critic")
+
+    def test_差し戻しに置き換え候補を添える(self):
+        from numeric import collect_from_text, merge_findings
+        for entry in self.state["history"]:
+            if entry["role"] == "result":
+                self.state["findings"] = merge_findings(
+                    self.state["findings"],
+                    collect_from_text(entry["content"], source="web_search(x)", step=1),
+                )
+        out = self.graph.correct_step(self.state)
+        feedback = out["history"][-1]["content"]
+        self.assertIn("取得済みの数値", feedback)
+        self.assertIn("置き換えに使うこと", feedback)
 
     def test_差し戻し上限で素通しする(self):
         self.state["correction_count"] = 2
@@ -595,11 +610,174 @@ class TestFinalAnswerAlwaysChecked(unittest.TestCase):
 
     def test_問題がなければ注記は付かない(self):
         self.state["history"][-1] = {
-            "role": "assistant", "content": "DONE: 直近は-9.35%の下落です。"}
+            "role": "assistant", "content": "DONE: 直近は-9.35% [実績] の下落です。"}
         out = self.graph.correct_step(self.state)
         self.assertEqual(out.get("verification_notes", []), [])
         self.assertNotIn("自動検証で確認できなかった点",
                          self.executor._finalize_result(out))
+
+
+class TestForecastVsActual(unittest.TestCase):
+    """予想値を実績として書いていないかの機械チェック"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        import numeric
+        self.checker = numeric_checker
+        self.numeric = numeric
+        self.findings = [
+            {"kind": "number", "raw": "84.1兆ウォン",
+             "context": "証券14社のコンセンサスでは84.1兆ウォン"},
+            {"kind": "number", "raw": "22.3兆ウォン",
+             "context": "第2四半期の売上高は22.3兆ウォンだった"},
+        ]
+
+    def test_予想の数値に実績タグを付けたら指摘する(self):
+        r = self.checker(output="売上高は84.1兆ウォン [実績] でした。",
+                         findings=self.findings)
+        self.assertEqual(r["verdict"], "NEEDS_REVISION")
+        self.assertIn("出典の文脈は予想", " ".join(r["issues"]))
+
+    def test_実績の数値に実績タグは指摘しない(self):
+        r = self.checker(output="売上高は22.3兆ウォン [実績] でした。",
+                         findings=self.findings)
+        self.assertNotIn("出典の文脈は予想", " ".join(r["issues"]))
+
+    def test_予想タグなら指摘しない(self):
+        r = self.checker(output="売上高は84.1兆ウォン [予想] の見込みです。",
+                         findings=self.findings)
+        self.assertNotIn("出典の文脈は予想", " ".join(r["issues"]))
+
+    def test_同じ文脈に実績と予想が同居しても取り違えない(self):
+        findings = [
+            {"kind": "number", "raw": "-9.35%",
+             "context": "SK하이닉스 -9.35% 하락. 매출 78조9680억원 전망."},
+        ]
+        r = self.checker(output="直近は-9.35% [実績] の下落です。", findings=findings)
+        self.assertNotIn("出典の文脈は予想", " ".join(r["issues"]))
+
+
+class TestTagRequirement(unittest.TestCase):
+    """[実績]/[予想] の欠落は、予想値が混ざっているときだけ差し戻す"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        self.checker = numeric_checker
+
+    def test_予想が混ざっていればタグ欠落を指摘する(self):
+        history = [{"role": "result", "content": "コンセンサスでは84.1兆ウォンの見通し"}]
+        r = self.checker(output="売上高は84.1兆ウォンでした。", history=history)
+        self.assertIn("[実績] / [予想] が付いていません", " ".join(r["issues"]))
+
+    def test_予想が無ければタグ欠落では差し戻さない(self):
+        history = [{"role": "result", "content": "第2四半期の売上高は22.3兆ウォンだった"}]
+        r = self.checker(output="売上高は22.3兆ウォンでした。", history=history)
+        self.assertNotIn("[実績] / [予想] が付いていません", " ".join(r["issues"]))
+
+    def test_一部にでもタグがあれば指摘しない(self):
+        history = [{"role": "result", "content": "コンセンサスは84.1兆ウォンの見通し。売上は22.3兆ウォン"}]
+        r = self.checker(output="84.1兆ウォン [予想]、22.3兆ウォン。", history=history)
+        self.assertNotIn("[実績] / [予想] が付いていません", " ".join(r["issues"]))
+
+
+class TestSignConflict(unittest.TestCase):
+    """変動率と変動額の符号が食い違う記述を拾う"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        self.checker = numeric_checker
+
+    def test_率と額の符号が逆なら指摘する(self):
+        history = [{"role": "result", "content": "終値は+5.2%、前日比-1,200円"}]
+        r = self.checker(output="終値は+5.2% [実績]（-1,200円）でした。", history=history)
+        self.assertIn("符号が食い違っています", " ".join(r["issues"]))
+
+    def test_同じ向きなら指摘しない(self):
+        history = [{"role": "result", "content": "終値は-7.47%、前日比-11,550円"}]
+        r = self.checker(output="終値は-7.47% [実績]（-11,550円）でした。", history=history)
+        self.assertNotIn("符号が食い違っています", " ".join(r["issues"]))
+
+    def test_率同士の符号違いは指摘しない(self):
+        history = [{"role": "result", "content": "前日比-3.2%、年初来+12%"}]
+        r = self.checker(output="前日比-3.2% [実績]、年初来+12% [実績] です。", history=history)
+        self.assertNotIn("符号が食い違っています", " ".join(r["issues"]))
+
+
+class TestNoRegressionOnRewrite(unittest.TestCase):
+    """訂正で情報量が減ったら、それ自体を指摘する"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        from reviewers import numeric_checker
+        self.checker = numeric_checker
+        self.findings = [
+            {"kind": "number", "raw": "22.3兆ウォン", "context": "売上高は22.3兆ウォン"},
+            {"kind": "number", "raw": "-14.65%", "context": "28日終値は-14.65%"},
+        ]
+
+    def test_裏付けのある数値が消えたら指摘する(self):
+        r = self.checker(
+            output="売上高は22.3兆ウォン [実績] でした。",
+            previous_output="売上高は22.3兆ウォン [実績]、株価は-14.65% [実績] でした。",
+            findings=self.findings,
+            history=[{"role": "result", "content": "売上高は22.3兆ウォン、28日終値は-14.65%"}],
+        )
+        self.assertIn("前回の回答にあった「-14.65%」が消えています", " ".join(r["issues"]))
+
+    def test_裏付けのない数値が消えても指摘しない(self):
+        r = self.checker(
+            output="売上高は22.3兆ウォン [実績] でした。",
+            previous_output="売上高は22.3兆ウォン [実績]、利益率は99.9% [実績] でした。",
+            findings=self.findings,
+            history=[{"role": "result", "content": "売上高は22.3兆ウォン、28日終値は-14.65%"}],
+        )
+        self.assertNotIn("99.9%", " ".join(i for i in r["issues"] if "消えています" in i))
+
+
+class TestCriticNeverDropsIssues(unittest.TestCase):
+    """差し戻す予算が無くても、レビューの指摘は最終回答に残す"""
+
+    def setUp(self):
+        _stub_llm_modules()
+        import graph
+        from state import make_initial_state
+        self.graph = graph
+        self.state = make_initial_state("株価動向")
+        self.state["history"] = [
+            {"role": "result", "content": "売上高は22.3兆ウォンだった"},
+            {"role": "assistant", "content": "DONE: 売上高は22.3兆ウォン [実績] でした。"},
+        ]
+        self.state["step_count"] = 10      # 残りステップ0 → 差し戻せない
+        self._orig_dispatch = graph.dispatch_reviewers
+        self._orig_run = graph.run_reviewers
+        graph.dispatch_reviewers = lambda *a, **k: ["generic_reviewer"]
+
+    def tearDown(self):
+        self.graph.dispatch_reviewers = self._orig_dispatch
+        self.graph.run_reviewers = self._orig_run
+
+    def _reviewers_say(self, verdict, issues):
+        self.graph.run_reviewers = lambda *a, **k: [{
+            "reviewer": "generic_reviewer", "verdict": verdict,
+            "issues": issues, "instruction": "", "raw": "",
+        }]
+
+    def test_予算切れでも指摘を注記に残す(self):
+        self._reviewers_say("NEEDS_REVISION", ["株価の時点が書かれていない"])
+        out = self.graph.critic_step(self.state)
+        self.assertEqual(out["status"], "done")
+        notes = " ".join(out["verification_notes"])
+        self.assertIn("株価の時点が書かれていない", notes)
+        self.assertIn("レビュー未反映", notes)
+
+    def test_予算切れでもOKなら注記は付かない(self):
+        self._reviewers_say("OK", [])
+        out = self.graph.critic_step(self.state)
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(out.get("verification_notes", []), [])
 
 
 class TestReviewerConstraints(unittest.TestCase):
@@ -621,6 +799,12 @@ class TestReviewerConstraints(unittest.TestCase):
 
     def test_根拠のない記述は削除を指示させる(self):
         self.assertIn("加筆ではなく削除", self.prompt)
+
+    def test_欠落の在り処を示させる(self):
+        self.assertIn("どこにあるかを示すこと", self.prompt)
+
+    def test_削除だけでなく置き換えまで指示させる(self):
+        self.assertIn("正しい値への置き換えまで指示すること", self.prompt)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
