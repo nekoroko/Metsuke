@@ -16,7 +16,7 @@ class AgentState(TypedDict):
     tool_verify_count: int    # verify_toolノードを通った回数（step_countとは別管理）
     max_tool_verifies: int    # verify_toolノードの最大実行回数
     findings: list[dict]      # 検索結果から機械抽出した数値・日付。履歴トリミングの対象外
-    sources: list[dict]       # 出典の取得結果（digestノード用。現時点では未使用）
+    sources: list[dict]       # 取得したページの抜粋 {"url","excerpt","source_truncated"}
     verification_notes: list[str]  # 差し戻せなかった検証結果。最終回答に注記として出す
     trace: list[dict]         # ノードの実行履歴（どこから来て何をして次はどこか）
     correction_count: int     # 訂正を差し戻した回数（素通りは数えない）
