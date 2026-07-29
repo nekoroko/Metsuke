@@ -1,0 +1,7 @@
+langchain
+langchain-openai
+langchain-anthropic
+langgraph
+streamlit
+apscheduler
+ddgs
