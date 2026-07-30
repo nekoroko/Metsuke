@@ -63,7 +63,30 @@ pip install -r requirements.txt
 cd agent-studio
 source ../agent-project/.venv/bin/activate  # venvは共有してOK
 pip install -r requirements.txt
-streamlit run app.py
+```
+
+UI は2つあります。同じ SQLite を見るので、両方立ち上げて比べられます。
+
+**React Web UI（推奨）**
+
+```bash
+cd web && npm install && npm run build && cd ..
+python -m api
+```
+
+ブラウザで `http://localhost:8000` を開きます。
+
+フロントを触りながら開発する場合は2プロセスに分けます。
+
+```bash
+uvicorn api.main:app --reload --port 8000   # API
+cd web && npm run dev                        # http://localhost:5173（/api は 8000 へプロキシ）
+```
+
+**Streamlit 版（移行前のUI）**
+
+```bash
+streamlit run app_streamlit.py
 ```
 
 ブラウザで `http://localhost:8501` を開きます。
@@ -353,7 +376,20 @@ agent-studio/
   executor.py     ツール実行・エージェント実行（バックグラウンド対応）
   ai_creator.py   AIによるツール生成・エラー修正
   scheduler.py    APSchedulerによる定期実行
-  app.py          エントリ（初期化とナビゲーション定義のみ）
+  llm_profiles.py LLM接続プロファイル（複数保存して実行時に選ぶ）
+  api/            React Web UI 用の HTTP API（FastAPI）
+    main.py         アプリ本体＋ web/dist の配信
+    routes_library.py   ツール・プレビュー・AI生成（SSE）
+    routes_agents.py    タスク・実行（SSE）・スケジュール
+    routes_config.py    モデル・設定（APIキーは返さない）
+    events.py       SSE の組み立て
+    schemas.py      入出力の形。秘密のマスクもここ
+  web/            React SPA（Vite + TypeScript）
+    src/api/        HTTPクライアント・型・TanStack Query
+    src/components/ シェル・⌘Kランチャー・共通部品
+    src/pages/      タスク／実行詳細／ライブラリ／スケジュール／設定
+    src/styles/     Modernist のトークン（modernist.css）＋画面固有CSS
+  app_streamlit.py 旧UIのエントリ（移行期の比較用に残している）
   ui/
     common.py         CSS・バッジ・プレビュー実行などの共通部品
     page_create.py    作成
