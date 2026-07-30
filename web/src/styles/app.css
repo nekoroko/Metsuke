@@ -62,8 +62,16 @@ button { font-family: inherit; }
   color: color-mix(in srgb, var(--color-text) 55%, transparent);
 }
 
-.nav { display: flex; flex-direction: column; padding: var(--space-2) 0; }
-.nav-item {
+/* サイドバーのナビ。
+ *
+ * modernist.css の .nav は「ヘッダーバー」用の別コンポーネントで、
+ * `.nav a[aria-current='page'] { color: var(--color-accent) }` を持つ。
+ * NavLink は選択中に aria-current="page" を付けるので、その名前を借りると
+ * 赤背景の上に赤文字になって選択項目が消える（実際に消えた）。
+ * 名前を分けて衝突させない。
+ */
+.sidenav { display: flex; flex-direction: column; padding: var(--space-2) 0; }
+.sidenav-item {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -76,23 +84,23 @@ button { font-family: inherit; }
   cursor: pointer;
   text-align: left;
 }
-.nav-item:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
-.nav-item.active {
+.sidenav-item:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
+.sidenav-item.active {
   background: var(--color-accent);
   color: var(--color-bg);
   font-weight: 600;
 }
-.nav-item.active .nav-badge { color: var(--color-bg); }
-.nav-label { flex: 1; min-width: 0; }
-.nav-badge {
+.sidenav-item.active .sidenav-badge { color: var(--color-bg); }
+.sidenav-label { flex: 1; min-width: 0; }
+.sidenav-badge {
   font: 400 10px 'Roboto Mono', ui-monospace, monospace;
   color: color-mix(in srgb, var(--color-text) 55%, transparent);
   display: flex; align-items: center; gap: 5px;
 }
-.nav-running-dot {
+.sidenav-dot {
   width: 6px; height: 6px; background: var(--color-accent); flex: none;
 }
-.nav-item.active .nav-running-dot { background: var(--color-bg); }
+.sidenav-item.active .sidenav-dot { background: var(--color-bg); }
 
 .sidebar-foot {
   margin-top: auto;
@@ -504,9 +512,52 @@ textarea.input { font-family: 'Roboto Mono', ui-monospace, monospace; font-size:
 
 @media (max-width: 1100px) {
   .sidebar { width: 56px; }
-  .nav-label, .nav-badge, .brand-sub, .sidebar-foot .sidebar-endpoint,
+  .sidenav-label, .sidenav-badge, .brand-sub, .sidebar-foot .sidebar-endpoint,
   .sidebar-foot .sidebar-model, .sidebar-tags { display: none; }
   .brand-name { font-size: 12px; }
   .run-body { flex-direction: column; }
   .run-side { width: auto; border-left: 0; border-top: 2px solid var(--color-divider); }
 }
+
+/* ===== ヘルプ ===== */
+
+/* 状態タグをリンクにする。下線や既定の色は出さず、タグの見た目のまま */
+.tag-link { text-decoration: none; display: inline-flex; }
+.tag-link:hover .tag { box-shadow: inset 0 0 0 1px var(--color-accent); }
+
+.help-body { max-width: 760px; font-size: 14px; line-height: 1.8; }
+.help-body h2 {
+  font: 800 19px var(--font-heading);
+  margin: var(--space-8) 0 var(--space-3);
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--color-divider);
+}
+.help-body h2:first-child { margin-top: 0; }
+.help-body h3 { font: 600 15px var(--font-heading); margin: var(--space-6) 0 var(--space-2); }
+.help-body p { margin: 0 0 var(--space-3); }
+.help-body ul, .help-body ol { margin: 0 0 var(--space-3); padding-left: 20px; }
+.help-body li { margin-bottom: 4px; }
+.help-body code {
+  font: 400 12.5px 'Roboto Mono', ui-monospace, monospace;
+  background: var(--color-surface);
+  padding: 1px 5px;
+}
+.help-body pre {
+  background: var(--color-surface);
+  border-left: 2px solid var(--color-divider);
+  padding: var(--space-3);
+  overflow-x: auto;
+  margin: 0 0 var(--space-3);
+}
+.help-body pre code { background: none; padding: 0; line-height: 1.7; }
+.help-body table { width: 100%; border-collapse: collapse; margin: 0 0 var(--space-4); }
+.help-body th {
+  text-align: left;
+  font: 600 11px 'Roboto Mono', ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 6px var(--space-2);
+  border-bottom: 2px solid var(--color-divider);
+}
+.help-body td { padding: 6px var(--space-2); border-bottom: 1px solid var(--color-divider); }
+.help-body strong { font-weight: 600; }

@@ -5,6 +5,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { Launcher } from './components/Launcher'
 import { Shell } from './components/Shell'
+import { HelpPage } from './pages/Help'
 import { LibraryPage } from './pages/Library'
 import { RunDetailPage } from './pages/RunDetail'
 import { RunsPage } from './pages/Runs'
@@ -40,6 +41,8 @@ export function App() {
           <Route path="/schedules" element={<SchedulesPage />} />
           <Route path="/settings" element={<Navigate to="/settings/models" replace />} />
           <Route path="/settings/:section" element={<SettingsPage />} />
+          <Route path="/help" element={<Navigate to="/help/podman" replace />} />
+          <Route path="/help/:topic" element={<HelpPage />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />
         </Routes>
       </Shell>

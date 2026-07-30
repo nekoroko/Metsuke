@@ -26,7 +26,7 @@ export function SettingsPage() {
   const { section = 'models' } = useParams<{ section: string }>()
   return (
     <div className="settings-layout">
-      <nav className="settings-nav">
+      <nav className="settings-nav sidenav">
         <div style={{ padding: '14px 16px', borderBottom: '2px solid var(--color-divider)' }}>
           <Kicker>Settings</Kicker>
         </div>
@@ -34,9 +34,9 @@ export function SettingsPage() {
           <NavLink
             key={s.key}
             to={`/settings/${s.key}`}
-            className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+            className={({ isActive }) => `sidenav-item${isActive ? ' active' : ''}`}
           >
-            <span className="nav-label">{s.ja} / {s.en}</span>
+            <span className="sidenav-label">{s.ja} / {s.en}</span>
           </NavLink>
         ))}
         <div style={{ padding: 16, marginTop: 'auto' }}>

@@ -27,11 +27,16 @@ router = APIRouter()
 def meta():
     info = config.get_current_provider_info()
     settings = db.get_all_settings()
+    # image_status() が返すのは state（ready / stale / missing / user_managed）。
+    # 以前ここで存在しないキー exists を見ていたため、構築済みでも常に
+    # 「未構築」と表示されていた。
+    sandbox_state = "unavailable"
     try:
         from sandbox import image_status
-        podman_ok = bool(image_status().get("exists"))
+        sandbox_state = image_status().get("state", "unavailable")
     except Exception:
-        podman_ok = False
+        pass                     # podman が無い環境でも画面は出す
+    podman_ok = sandbox_state in ("ready", "user_managed")
     return {
         "provider_label": f"{info.get('profile_name', '')} / {info.get('model', '')}",
         "default_profile": public_profile(llm_profiles.resolve_profile() or {}),
@@ -43,6 +48,7 @@ def meta():
         "default_graph_kind": graphs.default_kind(),
         "search_provider": settings.get("search_provider", "duckduckgo"),
         "podman_ok": podman_ok,
+        "sandbox_state": sandbox_state,
     }
 
 

@@ -118,6 +118,8 @@ export interface Meta {
   default_graph_kind: string
   search_provider: string
   podman_ok: boolean
+  /** ready / stale / missing / user_managed / unavailable（sandbox.image_status） */
+  sandbox_state: string
 }
 
 /** SSE で流れてくるイベント。api/events.py と対応。 */

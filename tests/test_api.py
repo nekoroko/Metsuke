@@ -301,6 +301,16 @@ class TestMeta(_ApiCase):
         # has_api_key は真偽値だけ。鍵そのもののフィールドは無い
         self.assertNotIn("api_key", got["default_profile"].keys())
 
+    def test_サンドボックスの状態を返す(self):
+        # image_status() のキーは state。以前ここで存在しない exists を
+        # 見ていたため、構築済みでも常に「未構築」と表示されていた
+        got = self.client.get("/api/meta").json()
+        self.assertIn("sandbox_state", got)
+        self.assertIn(got["sandbox_state"],
+                      {"ready", "stale", "missing", "user_managed", "unavailable"})
+        self.assertEqual(got["podman_ok"],
+                         got["sandbox_state"] in ("ready", "user_managed"))
+
     def test_既定モデルにも鍵が出ない(self):
         db.update_llm_profile(db.get_llm_profiles()[0]["id"],
                               api_key="sk-secret-meta")

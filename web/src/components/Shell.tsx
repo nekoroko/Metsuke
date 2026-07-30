@@ -3,9 +3,9 @@
 // 実行中のジョブは全画面から常に見えること（手順書 §5 の要件）。
 // そのため running の監視はここに置き、ページ側には持たせない。
 
-import { NavLink, useNavigate } from 'react-router-dom'
+import { Link, NavLink, useNavigate } from 'react-router-dom'
 import {
-  CalendarClock, Clock, List, Package, Settings as SettingsIcon,
+  CalendarClock, CircleHelp, Clock, List, Package, Settings as SettingsIcon,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 
@@ -18,6 +18,7 @@ const NAV = [
   { to: '/library', icon: Package, ja: 'ライブラリ', en: 'Library' },
   { to: '/schedules', icon: CalendarClock, ja: 'スケジュール', en: 'Schedules' },
   { to: '/settings/models', icon: SettingsIcon, ja: '設定', en: 'Settings' },
+  { to: '/help/podman', icon: CircleHelp, ja: 'ヘルプ', en: 'Help' },
 ]
 
 export function Shell({ children }: { children: ReactNode }) {
@@ -42,24 +43,24 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="brand-sub">LOCAL-FIRST AGENT RUNTIME</div>
         </div>
 
-        <nav className="nav">
+        <nav className="sidenav">
           {NAV.map(({ to, icon: Icon, ja, en }) => (
             <NavLink
               key={to}
               to={to}
-              className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+              className={({ isActive }) => `sidenav-item${isActive ? ' active' : ''}`}
             >
               <Icon size={15} strokeWidth={2} />
-              <span className="nav-label">
+              <span className="sidenav-label">
                 {ja} / {en}
               </span>
               {to === '/runs' && running.length > 0 ? (
-                <span className="nav-badge">
-                  <i className="nav-running-dot" />
+                <span className="sidenav-badge">
+                  <i className="sidenav-dot" />
                   {running.length}
                 </span>
               ) : counts[to] ? (
-                <span className="nav-badge">{counts[to]}</span>
+                <span className="sidenav-badge">{counts[to]}</span>
               ) : null}
             </NavLink>
           ))}
@@ -73,11 +74,18 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="sidebar-endpoint">
             {meta.data?.default_profile?.base_url || 'api.anthropic.com'}
           </div>
+          {/* 状態タグは、それぞれの直し方を書いたヘルプへのリンクにする。
+              「Podman 未構築」と出ている人が知りたいのは直し方なので、
+              表示から1クリックで手順に着けるようにする */}
           <div className="sidebar-tags">
-            <Tag kind="outline">{meta.data?.search_provider ?? '—'}</Tag>
-            <Tag kind={meta.data?.podman_ok ? 'neutral' : 'accent'}>
-              {meta.data?.podman_ok ? 'Podman OK' : 'Podman 未構築'}
-            </Tag>
+            <Link to="/help/search" className="tag-link" title="検索プロバイダの設定">
+              <Tag kind="outline">{meta.data?.search_provider ?? '—'}</Tag>
+            </Link>
+            <Link to="/help/podman" className="tag-link" title="サンドボックスの構築手順">
+              <Tag kind={meta.data?.podman_ok ? 'neutral' : 'accent'}>
+                {meta.data?.podman_ok ? 'Podman OK' : 'Podman 未構築 →'}
+              </Tag>
+            </Link>
           </div>
         </div>
       </aside>
