@@ -1,4 +1,4 @@
-# app.py — AI Agent Studio のエントリポイント
+# app_streamlit.py — Metsuke（旧UI・Streamlit版）のエントリポイント
 #
 # このファイルが持つのは初期化とナビゲーション定義だけで、
 # 各画面の実装は ui/page_*.py にある。
@@ -36,7 +36,7 @@ if "scheduler_started" not in st.session_state:
     start_scheduler()
     st.session_state.scheduler_started = True
 
-st.set_page_config(page_title="AI Agent Studio", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Metsuke", page_icon="⚡", layout="wide")
 
 # エントリスクリプトは毎回のリランで先頭から実行されるため、
 # ここで注入したCSSは全画面に効く
@@ -54,7 +54,7 @@ def _sidebar_header():
         label = "☁️ API (OpenAI互換)"
 
     with st.sidebar:
-        st.markdown('<p class="as-brand">⚡ AI Agent Studio</p>', unsafe_allow_html=True)
+        st.markdown('<p class="as-brand">⚡ Metsuke</p>', unsafe_allow_html=True)
         st.markdown(
             f'<p class="as-meta">{label}<br>'
             f'<span title="{info["base_url"]}">{info["model"] or "(モデル未設定)"}</span></p>',

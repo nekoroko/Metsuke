@@ -1,9 +1,42 @@
-# AI Agent Studio
+# Metsuke
 
 ローカルLLM（LM Studio）または任意のAPIで動く、自律型タスク実行エージェント基盤。
 Web GUIからツールを作成・管理し、スケジュール実行できます。
 
 データを外部に送らず、自分のPC上で完結させたい人向けに作っています。
+
+## 名前について
+
+**Metsuke（めつけ）** は「目付」— 見張る役、見て確かめる役から取っています。
+エージェントが出した答えをそのまま返さず、別のレビュアーが数値と出典を
+機械的に照合してから返す、というこのアプリの作りに由来します。
+
+リポジトリは `nekoroko/Metsuke` に改名済みです。一方、**以下の内部識別子は
+旧名（`agent-studio` / `agent_studio`）のまま**にしてあります。
+
+| 種類 | 値 |
+|---|---|
+| 設定DBのファイル名 | `agent_studio.db` |
+| DBパスの環境変数 | `AGENT_STUDIO_DB` |
+| DBの既定の置き場所 | `~/.local/share/agent-studio/` |
+| サンドボックスのイメージ名 | `agent-studio-sandbox:latest` |
+| Pythonのモジュール名 | `db.py` / `config.py` など（変更なし） |
+
+これらを変えると、すでに動いている環境で保存済みの設定・タスク・実行履歴が
+見つからなくなります。**表示名とリポジトリ名だけを Metsuke に変え、
+データの互換性は保っています。**
+
+### すでにクローン済みの場合
+
+リポジトリ名を変えると旧URLはリダイレクトされますが、リモートは明示的に
+書き換えておくのが安全です。
+
+```bash
+git remote set-url origin https://github.com/nekoroko/Metsuke.git
+```
+
+ローカルのディレクトリ名（`~/agent-studio` など）は、そのままで動きます。
+DBの場所はディレクトリ名に依存しません。
 
 ## 構成
 
@@ -11,20 +44,16 @@ Web GUIからツールを作成・管理し、スケジュール実行できま�
 2リポジトリに分かれていましたが、統合済みです）。
 
 ```
-agent_studio/
-  config.py       LLM接続設定（Local/API切り替え）
-  state.py        エージェントの状態定義
-  tools.py        エージェントが使うツール群
-  graph.py        ReActループ + Critic + 検索品質チェックのグラフ定義
-  reviewers.py    専門家レビュアープール
-  sandbox.py      Podmanサンドボックス実行
-  run.py          CLIから直接実行する場合のエントリポイント
-  db.py           SQLite（ツール、タスク、スケジュール、実行履歴、設定）
-  executor.py     ツール実行・エージェント実行（バックグラウンド対応）
-  ai_creator.py   AIによるツール生成・エラー修正
-  scheduler.py    APSchedulerによる定期実行
-  app.py          Streamlit UI
+agent-project/   ReActエージェントのコア（LLM呼び出し、ツール、レビュアー）
+Metsuke/         Web GUI、DB、スケジューラ（旧 agent-studio）
 ```
+
+`Metsuke` は `sys.path` 経由で `agent-project` を読み込んで動きます。
+`agent-project` 単体でもCLIから直接エージェントを動かせます（`run.py`）。
+
+以降の手順では、クローン先のディレクトリ名を `Metsuke` と書きます。
+改名前にクローンした環境では `agent-studio` のままで構いません
+（ディレクトリ名に依存する処理はありません）。
 
 ## 動作要件
 
@@ -65,7 +94,38 @@ cd agent_studio
 python3 -m venv .venv
 source .venv/bin/activate   # Windowsは .venv\Scripts\activate
 pip install -r requirements.txt
-streamlit run app.py
+```
+
+### 2. Metsuke
+
+```bash
+cd Metsuke
+source ../agent-project/.venv/bin/activate  # venvは共有してOK
+pip install -r requirements.txt
+```
+
+UI は2つあります。同じ SQLite を見るので、両方立ち上げて比べられます。
+
+**React Web UI（推奨）**
+
+```bash
+cd web && npm install && npm run build && cd ..
+python -m api
+```
+
+ブラウザで `http://localhost:8000` を開きます。
+
+フロントを触りながら開発する場合は2プロセスに分けます。
+
+```bash
+uvicorn api.main:app --reload --port 8000   # API
+cd web && npm run dev                        # http://localhost:5173（/api は 8000 へプロキシ）
+```
+
+**Streamlit 版（移行前のUI）**
+
+```bash
+streamlit run app_streamlit.py
 ```
 
 ブラウザで `http://localhost:8501` を開きます。
@@ -105,7 +165,7 @@ podman build -t agent-studio-sandbox:latest .
 
 DBの場所は `paths.py` で一元管理しており、実行時のカレントディレクトリに
 依存しません（`paths.py` と同じディレクトリに置かれます）。
-`agent-project` と `agent-studio` を別ディレクトリに分けて運用する場合は、
+`agent-project` と `Metsuke` を別ディレクトリに分けて運用する場合は、
 環境変数 `AGENT_STUDIO_DB` で明示的にパスを指定してください。
 
 #### ローカルLLMサーバーの選択肢
@@ -356,13 +416,26 @@ agent-project/
   sandbox.py      Podmanサンドボックス実行
   run.py          CLIから直接実行する場合のエントリポイント
 
-agent-studio/
+Metsuke/
   config.py       LLM接続設定（agent-projectと同一内容）
   db.py           SQLite（ツール、タスク、スケジュール、実行履歴、設定）
   executor.py     ツール実行・エージェント実行（バックグラウンド対応）
   ai_creator.py   AIによるツール生成・エラー修正
   scheduler.py    APSchedulerによる定期実行
-  app.py          エントリ（初期化とナビゲーション定義のみ）
+  llm_profiles.py LLM接続プロファイル（複数保存して実行時に選ぶ）
+  api/            React Web UI 用の HTTP API（FastAPI）
+    main.py         アプリ本体＋ web/dist の配信
+    routes_library.py   ツール・プレビュー・AI生成（SSE）
+    routes_agents.py    タスク・実行（SSE）・スケジュール
+    routes_config.py    モデル・設定（APIキーは返さない）
+    events.py       SSE の組み立て
+    schemas.py      入出力の形。秘密のマスクもここ
+  web/            React SPA（Vite + TypeScript）
+    src/api/        HTTPクライアント・型・TanStack Query
+    src/components/ シェル・⌘Kランチャー・共通部品
+    src/pages/      タスク／実行詳細／ライブラリ／スケジュール／設定
+    src/styles/     Modernist のトークン（modernist.css）＋画面固有CSS
+  app_streamlit.py 旧UIのエントリ（移行期の比較用に残している）
   ui/
     common.py         CSS・バッジ・プレビュー実行などの共通部品
     page_create.py    作成
@@ -373,7 +446,7 @@ agent-studio/
     page_settings.py  設定
 
 共通/
-  paths.py                設定DBの場所を一元管理（唯一の定義箇所）
+  paths.py                設定DBの場所と権限を一元管理（唯一の定義箇所）
   settings_store.py       設定DBの読み取り（config/tools/sandboxが共用）
   tool_runtime.py         ライブラリ定義の読み書き・プロンプト生成・ハッシュ
   Containerfile           サンドボックス実行用イメージの定義

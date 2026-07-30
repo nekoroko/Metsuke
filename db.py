@@ -1,9 +1,10 @@
-# db.py — AI Agent Studio データベース（Type 1 + Type 2対応）
+# db.py — Metsuke のデータベース（Type 1 + Type 2対応）
+# ファイル名 agent_studio.db は旧名のまま。既存環境の移行を避けるため。
 import sqlite3
 import uuid
 import json
 from datetime import datetime
-from paths import DB_PATH  # 実行CWDに依存しない絶対パス（paths.py参照）
+from paths import DB_PATH, ensure_db_location, secure_db_file  # paths.py参照
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -11,6 +12,8 @@ def get_connection():
     return conn
 
 def init_db():
+    # 置き場所の用意と旧位置からの引っ越し。接続より前に済ませる
+    ensure_db_location()
     conn = get_connection()
 
     # ツールライブラリ（Type 1用：保存済みコード）
@@ -187,6 +190,8 @@ def init_db():
     _migrate_llm_profile(conn)
     conn.commit()
     conn.close()
+    # sqlite が作ったファイルは既定 0644。APIキーが入るので 0600 に落とす
+    secure_db_file()
 
 
 def _migrate_llm_profile(conn):
@@ -474,6 +479,14 @@ def add_schedule(exec_type, target_id, cron_expr):
     conn.commit()
     conn.close()
     return sched_id
+
+def get_all_schedules():
+    """有効・無効を問わず全件。API の一覧はトグルも見せるため両方要る。"""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM schedules ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 def get_all_enabled_schedules():
     conn = get_connection()
