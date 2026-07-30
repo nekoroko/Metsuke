@@ -40,7 +40,8 @@ DBの場所はディレクトリ名に依存しません。
 
 ## 構成
 
-このプロジェクトは2つのリポジトリで構成されています。
+このリポジトリ1つで完結します（以前は `agent-project` / `agent-studio` の
+2リポジトリに分かれていましたが、統合済みです）。
 
 ```
 agent-project/   ReActエージェントのコア（LLM呼び出し、ツール、レビュアー）
@@ -75,7 +76,9 @@ Metsuke/         Web GUI、DB、スケジューラ（旧 agent-studio）
 これに対して以下の耐性機構を実装済みです。動かなくなることは避けられますが、
 快適に使うには8192以上のContext Lengthを推奨します。
 
-- **自動継続**: 応答がトークン上限で切れた場合、続きを自動的に追加取得して結合する
+- **自動継続**: 応答がトークン上限で切れた場合、続きを自動的に追加取得して結合する。
+  本文（content）が空のままトークン上限に達した場合（Thinkingだけで予算を
+  使い切ったケース）は、直前の思考の続きから検討を再開させる形で対応する
 - **ステップ予算に応じた収束制御**: 残りステップ数が少なくなると、新規調査を控えて
   今ある情報をまとめる方向に自動で誘導する
 - **強制収束**: それでもステップ上限に達した場合、今までの情報だけで
@@ -85,10 +88,9 @@ Metsuke/         Web GUI、DB、スケジューラ（旧 agent-studio）
 
 ## セットアップ
 
-### 1. agent-project
-
 ```bash
-cd agent-project
+git clone https://github.com/nekoroko/agent_studio.git
+cd agent_studio
 python3 -m venv .venv
 source .venv/bin/activate   # Windowsは .venv\Scripts\activate
 pip install -r requirements.txt
@@ -186,8 +188,7 @@ LM Studioでの動作を主に検証していますが、OpenAI互換APIを持�
 接続先がローカルかAPIかに関わらず、実際の上限は環境ごとに異なります
 （ローカルはサーバー側のContext Length設定次第、APIはモデル・プロバイダ次第）。
 「APIだから大きい値で決め打ち」「ローカルだから小さい値で決め打ち」という
-実装は、環境によって不正確になりズレます（実際、この決め打ちが原因で
-長文レポートが途中で打ち切られる不具合が発生したことがあります）。
+実装は、環境によって不正確になりズレます。
 
 そのため本アプリでは、Local / OpenAI互換API / Anthropic のいずれの設定画面にも
 「最大出力トークン数」の入力欄と「🔌 接続テスト（自動取得を試す）」ボタンを
@@ -264,23 +265,31 @@ Type1/Type2どちらのタスクも、cron式で定期実行を登録できま�
 
 ## アーキテクチャの要点
 
-### ReActループ + Critic（専門家レビュアープール）
+### ReActループ + 検索品質チェック + Critic（専門家レビュアープール）
 
 エージェントは以下のループで動作します。
 
 ```
-react（ツール実行・思考） → DONE
-                              ↓
-                        Dispatcher（タスク内容からレビュアーを選定）
-                              ↓
+react（ツール実行・思考）
+  │
+  ├─ ACTION=web_search等（検索系ツール） ──> verify_tool
+  │                                            （検索結果がクエリの意図に
+  │                                             答えているかLLMが軽量判定。
+  │                                             NGなら次に試すクエリを提案
+  │                                             して react に戻す）
+  │
+  └─ ACTION=DONE ──> Dispatcher（タスク内容からレビュアーを選定）
+                            ↓
               fact_checker / code_reviewer / security_reviewer /
               data_analyst / generic_reviewer
-                              ↓
-                   OK → 終了 ／ 要修正 → react に戻る（最大2回）
+                            ↓
+                 OK → 終了 ／ 要修正 → react に戻る（最大2回）
 ```
 
 Criticはエージェント本体とは別のLLM呼び出しで、成果物を批判的にレビューします。
 同じLLMが自分の回答を自己採点するより、役割を分離した方が問題を見つけやすいためです。
+`verify_tool`も同様に、ツール実行結果の評価だけを担う専用のノードとして分離しており、
+`react`側のロジックには手を加えずに検索品質のチェックを追加しています。
 
 ### サンドボックス実行
 
