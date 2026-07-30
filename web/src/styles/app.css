@@ -51,14 +51,33 @@ button { font-family: inherit; }
 }
 .sidebar-narrow { width: 190px; }
 
+/* サービス名（Metsuke）。文字列は src/brand.ts が唯一の定義箇所。
+ * ここはリンク（→ /help/about）なので、a の既定色・下線を打ち消す。 */
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   padding: var(--space-4);
   border-bottom: 2px solid var(--color-divider);
+  color: inherit;
+  text-decoration: none;
 }
-.brand-name { font: 800 15px/1.1 var(--font-heading); letter-spacing: .01em; }
+.brand:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
+.brand-mark {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  background: var(--color-accent);
+  color: #fff;
+}
+.brand-name { font: 800 18px/1.1 var(--font-heading); letter-spacing: .04em; }
 .brand-sub {
-  margin-top: 5px;
-  font: 400 10px 'Roboto Mono', ui-monospace, monospace;
+  margin-top: 4px;
+  font: 400 9px 'Roboto Mono', ui-monospace, monospace;
+  letter-spacing: .04em;
   color: color-mix(in srgb, var(--color-text) 55%, transparent);
 }
 
@@ -569,7 +588,10 @@ textarea.input { font-family: 'Roboto Mono', ui-monospace, monospace; font-size:
   .sidebar { width: 56px; }
   .sidenav-label, .sidenav-badge, .brand-sub, .sidebar-foot .sidebar-endpoint,
   .sidebar-foot .sidebar-model, .sidebar-tags { display: none; }
-  .brand-name { font-size: 12px; }
+  /* 56px 幅にサービス名は入らない。マークだけ残す
+     （名前はヘッダーの about リンクとタブタイトルで分かる） */
+  .brand { padding: var(--space-3) 0; justify-content: center; }
+  .brand-name { display: none; }
   .run-body { flex-direction: column; }
   .run-side { width: auto; border-left: 0; border-top: 2px solid var(--color-divider); }
 }

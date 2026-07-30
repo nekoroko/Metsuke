@@ -27,7 +27,7 @@ from api.routes_library import router as library_router
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST_DIR = os.path.join(BASE_DIR, "web", "dist")
 
-app = FastAPI(title="AI Agent Studio API", version="1.0")
+app = FastAPI(title="Metsuke API", version="1.0")
 
 # 開発時は Vite dev server（5173）から叩く。本番は同一オリジンなので
 # この設定は効かない。許可先を絞っているのは、ローカルの別プロセスから

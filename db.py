@@ -1,4 +1,5 @@
-# db.py — AI Agent Studio データベース（Type 1 + Type 2対応）
+# db.py — Metsuke のデータベース（Type 1 + Type 2対応）
+# ファイル名 agent_studio.db は旧名のまま。既存環境の移行を避けるため。
 import sqlite3
 import uuid
 import json

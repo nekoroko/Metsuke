@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
+import { pageTitle } from './brand'
 import { Launcher } from './components/Launcher'
 import { Shell } from './components/Shell'
 import { HelpPage } from './pages/Help'
@@ -16,6 +17,12 @@ import { TasksPage } from './pages/Tasks'
 
 export function App() {
   const [launcherOpen, setLauncherOpen] = useState(false)
+
+  // タブのタイトルもサービス名で出す。index.html にも書いてあるが、
+  // 名前の定義箇所を brand.ts 1つに寄せるためここで上書きする
+  useEffect(() => {
+    document.title = pageTitle()
+  }, [])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -43,7 +50,7 @@ export function App() {
           <Route path="/schedules" element={<SchedulesPage />} />
           <Route path="/settings" element={<Navigate to="/settings/models" replace />} />
           <Route path="/settings/:section" element={<SettingsPage />} />
-          <Route path="/help" element={<Navigate to="/help/podman" replace />} />
+          <Route path="/help" element={<Navigate to="/help/about" replace />} />
           <Route path="/help/:topic" element={<HelpPage />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />
         </Routes>

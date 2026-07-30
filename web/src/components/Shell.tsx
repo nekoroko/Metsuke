@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from 'react'
 
 import { useAgentTasks, useExecutions, useMeta, useTools } from '../api/hooks'
+import { BRAND_NAME, BRAND_NAME_UPPER, BRAND_TAGLINE } from '../brand'
 import { Kicker, Progress, Tag } from './ui'
 
 const NAV = [
@@ -18,7 +19,7 @@ const NAV = [
   { to: '/library', icon: Package, ja: 'ライブラリ', en: 'Library' },
   { to: '/schedules', icon: CalendarClock, ja: 'スケジュール', en: 'Schedules' },
   { to: '/settings/models', icon: SettingsIcon, ja: '設定', en: 'Settings' },
-  { to: '/help/podman', icon: CircleHelp, ja: 'ヘルプ', en: 'Help' },
+  { to: '/help/about', icon: CircleHelp, ja: 'ヘルプ', en: 'Help' },
 ]
 
 export function Shell({ children }: { children: ReactNode }) {
@@ -38,10 +39,14 @@ export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-name">AI AGENT STUDIO</div>
-          <div className="brand-sub">LOCAL-FIRST AGENT RUNTIME</div>
-        </div>
+        {/* サービス名は常に目に入る位置に出す。クリックで「Metsuke とは」へ */}
+        <Link to="/help/about" className="brand" title={`${BRAND_NAME} とは`}>
+          <div className="brand-mark" aria-hidden>⚡</div>
+          <div>
+            <div className="brand-name">{BRAND_NAME_UPPER}</div>
+            <div className="brand-sub">{BRAND_TAGLINE}</div>
+          </div>
+        </Link>
 
         <nav className="sidenav">
           {NAV.map(({ to, icon: Icon, ja, en }) => (
