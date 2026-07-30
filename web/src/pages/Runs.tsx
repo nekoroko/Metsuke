@@ -19,7 +19,8 @@ export function RunsPage() {
   const rows = (executions.data ?? []).filter((e) => filter === 'all' || e.status === filter)
 
   return (
-    <>
+    // 見出しとフィルタは固定。スクロールするのは表だけ
+    <div className="page">
       <header className="page-header">
         <div>
           <div className="kicker">Runs</div>
@@ -43,7 +44,7 @@ export function RunsPage() {
       {rows.length === 0 ? (
         <Empty message="まだ実行履歴がありません。" />
       ) : (
-        <div className="table-wrap">
+        <div className="page-scroll">
           <table className="grid">
             <thead>
               <tr>
@@ -83,6 +84,6 @@ export function RunsPage() {
           </table>
         </div>
       )}
-    </>
+    </div>
   )
 }

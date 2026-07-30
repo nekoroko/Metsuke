@@ -126,13 +126,37 @@ button { font-family: inherit; }
  * （.main-scroll は flex アイテムとして高さが確定しているので % が効く）。 */
 .main-scroll { flex: 1; min-height: 0; overflow: auto; }
 
+/* ページの上部（見出し・フィルタ・検索）を固定し、下だけスクロールさせる枠。
+ *
+ * sticky を段に積む方法は取らない。2段目以降に top の実値が要るが、
+ * 見出しの高さは可変（.roomy で 26px→34px）で、当て推量を置くと
+ * 条件次第で隙間や重なりが出る。
+ *
+ * 共通の器（.main-scroll）ではなく**このページの中だけ**で高さを確定
+ * させる。前に .main-scroll を flex column にして全ページを壊しており、
+ * 同じ轍は踏まない。 */
+.page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.page > .page-header,
+.page > .filters,
+.page > .searchbar { flex: none; }
+.page-scroll { flex: 1; min-height: 0; overflow: auto; }
+
+/* 列見出しはスクロール域の最上部に貼り付ける。行を追ってスクロール
+ * したときに、どの列が何なのか分からなくなるのを防ぐ */
+.page-scroll table.grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-bg);
+}
+
 /* ページ見出しは常に固定。スクロールしても「今どの画面か」と
  * 主要な操作（実行・追加・保存）が見えている状態を保つ。
  *
- * position:sticky はレイアウトの流れを変えないので、以前
- * .main-scroll を flex column にして全ページを壊したときのような
- * 副作用が出ない。スクロールする器（.main-scroll / 設定・ヘルプの
- * 右ペイン）の直下にあれば効く。 */
+ * .page を使うページでは flex で固定されるので、この sticky は
+ * それ以外のページ（ライブラリ・スケジュール・設定・ヘルプ）向け。
+ * position:sticky はレイアウトの流れを変えないので、.main-scroll を
+ * flex column にして全ページを壊したときのような副作用は出ない。 */
 .page-header {
   position: sticky;
   top: 0;

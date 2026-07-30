@@ -128,14 +128,29 @@ README に飛ばさないのは、「Podman 未構築」と出ている人が知
 `overflow:auto` を持たせている。`.main-scroll` は flex アイテムとして
 高さが確定しているので、`%` 指定が効く。
 
-ページ見出し（`.page-header`）は全画面で `position: sticky; top: 0`。
-スクロールしても「今どの画面か」と主要な操作（実行・追加・保存）が
-見えている状態を保つ。sticky はレイアウトの流れを変えないので、
-下記の事故のような副作用は出ない。
+## 上部を固定する
 
-フィルタ行は固定していない。sticky には `top` の実値が要るが、
-ヘッダーの高さは可変（`.roomy` で見出しが 26px→34px）で、当て推量の値を
-置くと条件次第で隙間や重なりが出る。
+一覧のある画面（タスク・実行履歴・設定›モデル）は、**見出し・フィルタ行・
+検索欄・テーブルの列見出しまでを固定**し、行だけがスクロールする。
+
+```
+<div className="page">          height:100% の縦フレックス
+  <header className="page-header" />   flex:none
+  <div className="filters" />          flex:none
+  <div className="searchbar" />        flex:none
+  <div className="page-scroll">        flex:1; overflow:auto
+    <table>  ← thead th は position:sticky; top:0
+```
+
+**sticky を段に積む方法は取らない。** 2段目以降に `top` の実値が要るが、
+見出しの高さは可変（`.roomy` で 26px→34px）で、当て推量を置くと条件次第で
+隙間や重なりが出る。
+
+一覧を持たない画面（ライブラリ・スケジュール・設定の他の節・ヘルプ）は
+`.page-header` の `position: sticky; top: 0` だけで足りる。
+
+**共通の器（`.main-scroll`）は変えない。** 高さを確定させるのは
+そのページの中だけにする（下記の事故を繰り返さないため）。
 
 **`.main-scroll` を flex column にしてはいけない。** 一度そうしたところ、
 flex の子は既定で縮む（`flex-shrink:1`）ため、実行詳細**以外**の全ページで

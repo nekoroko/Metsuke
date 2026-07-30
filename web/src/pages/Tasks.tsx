@@ -75,7 +75,8 @@ export function TasksPage({ onOpenLauncher }: { onOpenLauncher: () => void }) {
   }
 
   return (
-    <>
+    // 見出し・フィルタ・検索は固定。スクロールするのは一覧だけ
+    <div className="page">
       <header className="page-header">
         <div>
           <div className="kicker">Tasks</div>
@@ -132,7 +133,7 @@ export function TasksPage({ onOpenLauncher }: { onOpenLauncher: () => void }) {
           }
         />
       ) : dense ? (
-        <div className="table-wrap">
+        <div className="page-scroll">
           <table className="grid">
             <thead>
               <tr>
@@ -187,7 +188,7 @@ export function TasksPage({ onOpenLauncher }: { onOpenLauncher: () => void }) {
           </table>
         </div>
       ) : (
-        <div className="page-body roomy">
+        <div className="page-scroll page-body roomy">
           <div className="cards">
             {rows.map((t) => {
               const run0 = latestRun(t.id)
@@ -229,6 +230,6 @@ export function TasksPage({ onOpenLauncher }: { onOpenLauncher: () => void }) {
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 }

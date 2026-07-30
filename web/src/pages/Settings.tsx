@@ -94,7 +94,7 @@ function ModelsSection() {
   }
 
   return (
-    <>
+    <div className="page">
       <header className="page-header">
         <div>
           <div className="kicker">Models</div>
@@ -113,7 +113,7 @@ function ModelsSection() {
         </div>
       </header>
 
-      <div className="page-body">
+      <div className="page-scroll page-body">
         {error && <div className="notice" style={{ marginBottom: 12 }}>{error}</div>}
         <table className="grid">
           <thead>
@@ -205,7 +205,7 @@ function ModelsSection() {
           />
         )}
       </div>
-    </>
+    </div>
   )
 }
 
