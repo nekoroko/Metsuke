@@ -212,6 +212,37 @@
       }
     },
     {
+      "id": "doc29_answer_with_citations",
+      "note": "回答本文に出典URLを書いた形（報告I の後半）。§7 が出典明記を求めているので、これは例外ではなく通常発生する。潰さないと %XX が「XX%」として拾われ、1本のURLで7件の偽の指摘が出る。H の修正で差し戻しが実際に働くようになったため、偽の指摘が本物の枠を消費する。本文は合成だが、URLは実物の作りと同じ。",
+      "raw_file": "raw/doc29_answer_with_citations.txt",
+      "layout": "answer_with_citations",
+      "real_numbers": [
+        "9.2兆ウォン",
+        "79兆3000億ウォン",
+        "557%",
+        "-14.65%",
+        "130.17ドル"
+      ],
+      "url_noise": {
+        "why": "出典URLのパーセントエンコーディング。回答側を潰さないと、これらが回答中の数値として扱われ「出典に見当たりません」の指摘になる。",
+        "values_before_fix": [
+          "5%",
+          "96%",
+          "6%",
+          "88%",
+          "50%",
+          "95%",
+          "98%",
+          "89%",
+          "7%"
+        ]
+      },
+      "tags": {
+        "why": "URLのゴミにはタグが付かないので、untagged_ratio が「全件タグなし」と誤判定してタグ不足の指摘まで足していた。",
+        "expected_untagged_after_fix": 0
+      }
+    },
+    {
       "id": "doc28_headlines_actual",
       "raw_file": "raw/doc28_headlines_actual.txt",
       "note": "実績を報じる文。ただし「予想下回り」「予想に届かず」のように予想語を含むため、classify_value_type が forecast と誤分類する（報告B）。expectations は line（0始まりの行番号）と raw（extract_numbers が返す表記そのまま）で1件ずつ固定する。unknown は「まだ判定材料が無いので unknown のままで正解」という意味であって、直し損ねではない。",

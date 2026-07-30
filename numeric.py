@@ -1118,11 +1118,17 @@ def mechanical_fixes(answer: str, findings: list, history: list = None) -> tuple
       2. 出典に見当たらない数値の直後に「（出典未確認）」を付ける
 
     戻り値は (直した本文, 適用した内容のリスト)。
+
+    判定はURLを潰したテキストに対して行い、返す本文は元のテキストのまま。
+    回答には「出典: https://…」が入るので、潰さないとURLのバイト列に
+    「（出典未確認）」を付けてしまう。空白で潰しているので位置は一致する
+    （mask_urls は長さを変えない）。
     """
     text = answer or ""
     applied = []
 
-    for t in tag_conflicts(text, findings or []):
+    # タグの是正は正規表現で内容置換するので、判定だけマスク済みで行えばよい
+    for t in tag_conflicts(mask_urls(text), findings or []):
         pattern = re.escape(t["raw"]) + r"(\s*)" + re.escape(t["written"])
         new_text, count = re.subn(pattern, t["raw"] + r"\1" + t["expected"], text, count=1)
         if count:
@@ -1141,8 +1147,11 @@ def mechanical_fixes(answer: str, findings: list, history: list = None) -> tuple
         if f.get("kind") == "number":
             known.extend(extract_numbers(f.get("raw", "")))
 
-    # 位置がずれないよう、後ろから挿入する
-    for n in sorted(extract_numbers(text), key=lambda x: x["end"], reverse=True):
+    # 位置がずれないよう、後ろから挿入する。
+    # 数値の列挙はマスク済みテキストから行い、挿入は元テキストに対して行う。
+    # マスクは長さを変えないので end の位置は両者で一致する。
+    # タグ是正で長さが変わっている可能性があるので、ここで取り直す。
+    for n in sorted(extract_numbers(mask_urls(text)), key=lambda x: x["end"], reverse=True):
         if matches_any(n, known):
             continue
         if text[n["end"]:n["end"] + len(UNVERIFIED_MARK)] == UNVERIFIED_MARK:
@@ -1161,7 +1170,7 @@ def confirmed_from(answer: str, findings: list) -> list[dict]:
     防ぐために使う（実測で、実績値が消えて予想値に入れ替わっている）。
     """
     out = []
-    for lv in labeled_values(answer or ""):
+    for lv in labeled_values(mask_urls(answer)):
         for f in findings or []:
             if f.get("kind") != "number":
                 continue
@@ -1202,8 +1211,12 @@ def format_confirmed(confirmed: list, char_budget: int = 400) -> str:
 
 
 def missing_confirmed(answer: str, confirmed: list) -> list[dict]:
-    """確定済みなのに、今回の回答から消えた値を返す。"""
-    now = extract_numbers(answer or "")
+    """確定済みなのに、今回の回答から消えた値を返す。
+
+    URLは潰す。潰さないと、出典URLに偶然含まれる数値が確定済みの値と
+    一致して「まだ本文にある」と誤判定し、補記が抑止される。
+    """
+    now = extract_numbers(mask_urls(answer))
     out = []
     for c in confirmed or []:
         parsed = extract_numbers(c.get("raw", ""))

@@ -1,0 +1,12 @@
+## SKハイニックス 2026年4-6月期の決算と株価動向
+
+第2四半期の営業利益は9.2兆ウォン [実績] でした（2026年7月28日発表）。
+出典: https://news.example.com/articles/2026/07/28/%E5%96%B6%E6%A5%AD%E5%88%A9%E7%9B%8A?ref=%E6%B1%BA%E7%AE%97
+
+売上高は79兆3000億ウォン [実績] で、前年同期比557% [実績] の増加です（同上）。
+
+株価は28日終値で-14.65% [実績] となりました。
+出典: https://finance.example.co.kr/search?query=SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4&per=50%25
+
+直近の終値は130.17ドル [実績] です（2026年7月28日時点）。
+出典: https://finance.example.com/quote/000660.KS/history?period1=1753660800&interval=1d

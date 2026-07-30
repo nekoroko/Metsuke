@@ -1980,3 +1980,103 @@ class TestUrlNoise(unittest.TestCase):
         led = self._ledger()
         self.assertLessEqual(len(self._numbers(led)), 10,
                              "1ページの数値が多すぎる（URLのゴミが残っている）")
+
+
+class TestUrlNoiseInAnswer(unittest.TestCase):
+    """
+    回答本文に書かれた出典URLを、回答の数値として扱わない（報告I の後半）。
+
+    §7 が出典明記を求めているので、回答に「出典: https://…」が入るのは
+    通常のケース。出典側だけ潰しても、回答側で %XX が「XX%」として拾われ、
+    1本のURLで7件の偽の指摘が出る。報告H で差し戻しが実際に働くように
+    なったため、この偽の指摘が本物の差し戻し枠を消費してしまう。
+
+    方針は「判定はマスク後・出力は元テキスト」。mask_urls は長さを
+    変えないので、位置に依存する仕組み（tag_after、（出典未確認）の挿入）は
+    マスク済みテキストから得た位置をそのまま元テキストに使える。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        self.case, self.answer = _raw_fixture("doc29_answer_with_citations")
+        _, search = _raw_fixture("doc29_search_with_urls")
+        self.findings = numeric.collect_from_text(search, source="web_search(x)")
+        self.history = [{"role": "result", "origin": numeric.ORIGIN_SOURCE,
+                         "content": search}]
+
+    def test_URL由来の数値を回答の数値として拾わない(self):
+        got = [x["raw"] for x in self.numeric.extract_numbers(
+            self.numeric.mask_urls(self.answer))]
+        for junk in self.case["url_noise"]["values_before_fix"]:
+            self.assertNotIn(junk, got, f"回答から {junk} を拾っている")
+
+    def test_本物の数値は残る(self):
+        got = [x["raw"] for x in self.numeric.extract_numbers(
+            self.numeric.mask_urls(self.answer))]
+        for value in self.case["real_numbers"]:
+            self.assertIn(value, got, f"本物の {value} が落ちた")
+
+    def test_出典URLで偽の指摘が出ない(self):
+        r = self.checker(output=self.answer, history=self.history,
+                         findings=self.findings)
+        bogus = [i for i in r["issues"]
+                 if any(j in i for j in self.case["url_noise"]["values_before_fix"])]
+        self.assertEqual(bogus, [], "URL由来の偽の指摘が出ている")
+
+    def test_タグ不足の誤判定が出ない(self):
+        # URLのゴミにはタグが付かないので、全件タグなしと誤判定していた
+        untagged, total = self.numeric.untagged_ratio(
+            self.numeric.mask_urls(self.answer))
+        self.assertEqual(untagged, self.case["tags"]["expected_untagged_after_fix"])
+        self.assertEqual(total, len(self.case["real_numbers"]))
+        r = self.checker(output=self.answer, history=self.history,
+                         findings=self.findings)
+        self.assertEqual([i for i in r["issues"] if "いずれにも" in i], [])
+
+    def test_捏造値は今までどおり却下される(self):
+        # 回答をマスクしても、URL以外の捏造値の検出は弱まらない
+        answer = self.answer + "\n営業利益率は99.9% [実績] でした。"
+        r = self.checker(output=answer, history=self.history, findings=self.findings)
+        self.assertIn("99.9%", " ".join(r["issues"]))
+
+    def test_mechanical_fixesは元の本文を返す(self):
+        n = self.numeric
+        bad = ("営業利益は9.2兆ウォン [予想] でした。利益率は99.9%です。\n"
+               "出典: https://news.example.com/a/%E5%96%B6%E6%A5%AD%E5%88%A9")
+        fixed, applied = n.mechanical_fixes(bad, self.findings, self.history)
+        # URLは1文字も壊れていない
+        self.assertIn("https://news.example.com/a/%E5%96%B6%E6%A5%AD%E5%88%A9", fixed)
+        # URLの中に印が入っていない
+        citation = fixed.split("出典: ")[1]
+        self.assertNotIn(n.UNVERIFIED_MARK, citation)
+        # やるべき2つはやっている
+        self.assertIn("9.2兆ウォン [実績]", fixed)
+        self.assertIn(f"99.9%{n.UNVERIFIED_MARK}", fixed)
+
+    def test_位置がマスクの前後でずれない(self):
+        # tag_after はマスク済みテキストから得た end を元テキストに使う
+        n = self.numeric
+        masked = n.mask_urls(self.answer)
+        self.assertEqual(len(masked), len(self.answer))
+        for x in n.extract_numbers(masked):
+            with self.subTest(value=x["raw"]):
+                self.assertEqual(self.answer[x["start"]:x["end"]],
+                                 masked[x["start"]:x["end"]])
+                self.assertTrue(n.tag_after(self.answer, x["end"]),
+                                f"{x['raw']} のタグが元テキストから読めない")
+
+    def test_確定済みの判定もURLに引っかからない(self):
+        n = self.numeric
+        # URL に偶然含まれる数値で確定済みが作られない
+        conf = n.confirmed_from(self.answer, self.findings)
+        for c in conf:
+            self.assertNotIn(c["raw"], self.case["url_noise"]["values_before_fix"])
+        # 出典URLの数値で「まだ本文にある」と誤判定して補記を止めない
+        gone = n.missing_confirmed(
+            "出典: https://ex.example/a?p=50%25 のみ。",
+            [{"raw": "50%", "label": "利益率", "value_type": "actual"}])
+        self.assertEqual([g["raw"] for g in gone], ["50%"])

@@ -413,7 +413,17 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
     """
     issues = []
 
-    for pair in find_conversion_pairs(output or ""):
+    # 回答本文のURLも潰す。§7 で出典明記を求めているので、回答に
+    # 「出典: https://…」が入るのは通常のケース。潰さないと %XX が
+    # 「XX%」として拾われ、1本のURLで7件の偽の指摘が出る。
+    # 差し戻しの枠には余白が無いので、偽の指摘が本物の枠を消費してしまう。
+    #
+    # 判定はこのマスク済みテキストに対して行い、指摘文に載せる位置や
+    # 本文の書き換え（mechanical_fixes）は元のテキストのまま扱う。
+    # 空白で潰しているので start / end は元テキストと一致する。
+    ans = mask_urls(output or "")
+
+    for pair in find_conversion_pairs(ans):
         if not conversion_plausible(pair):
             issues.append(
                 f"換算が矛盾しています: 「{pair['raw']}」。"
@@ -443,8 +453,8 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
     candidates = _history_numbers(history, sources)
     # 時系列表から読み取れた価格。単位が無いので「存在するか」の判定にだけ使う
     bare = ohlc_values(src_texts)
-    answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(output or "")}
-    for n in extract_numbers(output or ""):
+    answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(ans)}
+    for n in extract_numbers(ans):
         # 抽出は完璧ではない。原文にその表記がそのまま出ているなら、
         # 「出典に無い」と断じない（実測で、原文にある売上高が却下された）
         if (not matches_any(n, candidates)
@@ -473,7 +483,7 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
                 f"{suggestion}{trunc_note}（該当箇所: …{n['context']}…）。"
             )
 
-    for m in label_value_mismatches(output or "", findings or [], src_texts):
+    for m in label_value_mismatches(ans, findings or [], src_texts):
         if m["reason"] == "value":
             issues.append(
                 f"「{m['label']}」の値が出典と違います。回答は「{m['raw']}」ですが、"
@@ -488,20 +498,20 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
                 f"ラベルの対応を出典どおりに直すか、この記述を削除してください。"
             )
 
-    for t in tag_conflicts(output or "", findings or []):
+    for t in tag_conflicts(ans, findings or []):
         issues.append(
             f"「{t['raw']}」の種別タグが出典と違います。回答は {t['written']} ですが、"
             f"出典の文脈は {t['expected']} です（出典: …{t['context'][:50]}…）。"
         )
 
-    for m in forecast_marked_as_actual(output or "", findings or []):
+    for m in forecast_marked_as_actual(ans, findings or []):
         issues.append(
             f"「{m['raw']}」に [実績] と付いていますが、出典の文脈は予想です"
             f"（出典: …{m['context'][:60]}…）。[予想] に直すか、"
             f"実績値を検索して置き換えてください。"
         )
 
-    untagged, total = untagged_ratio(output or "")
+    untagged, total = untagged_ratio(ans)
     if total and untagged == total and _forecast_in_context(history, findings):
         # タグの欠落を常に差し戻すと、予想と実績の取り違えが起こりえない
         # タスクでも書式だけのために1ラウンド消える。取得済みの情報に
@@ -512,7 +522,7 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
             f"判断できないものは [種別不明] と書き、省略しないでください。"
         )
 
-    for c in sign_conflicts(output or ""):
+    for c in sign_conflicts(ans):
         issues.append(
             f"符号が食い違っています: 変動率「{c['rate']}」と変動額「{c['amount']}」"
             f"（該当箇所: …{c['context']}…）。"
@@ -520,7 +530,7 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
             f"「符号不整合のため要確認」と明記してください。"
         )
 
-    for d in dropped_supported_numbers(previous_output or "", output or "",
+    for d in dropped_supported_numbers(mask_urls(previous_output or ""), ans,
                                        findings or []):
         issues.append(
             f"前回の回答にあった「{d['raw']}」が消えています。"
