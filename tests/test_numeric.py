@@ -1871,3 +1871,112 @@ class TestOriginRegressionOnRealData(unittest.TestCase):
             src = inspect.getsource(mod)
             self.assertNotIn("collect_from_text(feedback", src)
             self.assertNotIn("collect_from_text(nudge", src)
+
+
+class TestUrlNoise(unittest.TestCase):
+    """
+    URLの数値を拾わない（報告I）。
+
+    検索結果は「URL: https://…」の行を含んだまま collect_from_text に渡る。
+    パーセントエンコーディングの %XX が全部「XX%」として拾われるため、
+    1本のURLで9件のゴミが台帳に入っていた。
+
+    URLごとテキストを弾くのではなく、URLの範囲だけを同じ長さの空白に潰す。
+    「URL: …\n概要: 営業利益は9.2兆ウォン」のように1つの文字列にURLと本文が
+    同居しているので、まとめて弾くと本物の数値まで落ちる（報告A と同じ事故）。
+    """
+
+    def setUp(self):
+        _stub_llm_modules()
+        import numeric
+        from reviewers import numeric_checker
+        self.numeric = numeric
+        self.checker = numeric_checker
+        self.case, self.raw = _raw_fixture("doc29_search_with_urls")
+
+    def _ledger(self, text=None):
+        return self.numeric.collect_from_text(text if text is not None else self.raw,
+                                              source="web_search(x)")
+
+    def _numbers(self, led):
+        return [f["raw"] for f in led if f["kind"] == "number"]
+
+    def test_位置を保つために長さを変えない(self):
+        masked = self.numeric.mask_urls(self.raw)
+        self.assertEqual(len(masked), len(self.raw))
+        self.assertNotIn("https://", masked)
+
+    def test_URL由来の数値は台帳に載らない(self):
+        got = self._numbers(self._ledger())
+        for junk in self.case["url_noise"]["values_before_fix"]:
+            self.assertNotIn(junk, got, f"URL由来の {junk} が台帳に入っている")
+
+    def test_同じテキストの本物の数値は落ちない(self):
+        # URLと本文が同居している。テキストごと弾く実装では全部消える
+        got = self._numbers(self._ledger())
+        for value in self.case["expected_numbers"]:
+            self.assertIn(value, got, f"本物の {value} が落ちた")
+
+    def test_呼び出し元4箇所ぶんの入力で台帳がきれいになる(self):
+        # collect_from_text は graph.py 2箇所 / graph_research.py 2箇所から
+        # 呼ばれる。入口で塞いでいるので、どの形の入力でも同じ結果になる
+        forms = {
+            "graph.py:605 web_search": self.raw,
+            "graph.py:638 fetch本文": f"[本文取得] https://ex.example/a?q=%E6%B1%BA%E7%AE%97\n{self.raw}",
+            "graph_research.py:455 検索": f"[検索] SK決算\n{self.raw}",
+            "graph_research.py:529 抜粋": self.raw[:800],
+        }
+        for where, text in forms.items():
+            with self.subTest(where=where):
+                got = self._numbers(self._ledger(text))
+                for junk in self.case["url_noise"]["values_before_fix"]:
+                    self.assertNotIn(junk, got, f"{where} で {junk} が入った")
+
+    def test_照合でURLのバイト列に一致しない(self):
+        n = self.numeric
+        hist = [{"role": "result", "origin": n.ORIGIN_SOURCE, "content": self.raw}]
+        led = self._ledger()
+        for junk in self.case["url_noise"]["must_not_pass"]:
+            with self.subTest(value=junk):
+                r = self.checker(output=f"利益率は{junk} [実績] でした。",
+                                 history=hist, findings=led)
+                self.assertIn("見当たりません", " ".join(r["issues"]),
+                              f"{junk} がURLのバイト列と一致して通った")
+
+    def test_照合で本物の数値は通る(self):
+        n = self.numeric
+        hist = [{"role": "result", "origin": n.ORIGIN_SOURCE, "content": self.raw}]
+        led = self._ledger()
+        for value in ("9.2兆ウォン", "557%", "130.17ドル"):
+            with self.subTest(value=value):
+                r = self.checker(output=f"値は{value} [実績] でした。",
+                                 history=hist, findings=led)
+                self.assertNotIn("見当たりません", " ".join(r["issues"]),
+                                 f"本物の {value} を却下した")
+
+    def test_置換候補にURL由来の値を出さない(self):
+        import reviewers
+        n = self.numeric
+        hist = [{"role": "result", "origin": n.ORIGIN_SOURCE, "content": self.raw}]
+        raws = [x["raw"] for x in reviewers._history_numbers(hist)]
+        for junk in self.case["url_noise"]["values_before_fix"]:
+            self.assertNotIn(junk, raws, f"候補に {junk} が並んでいる")
+
+    def test_confirmedはこの修正だけで汚染されなくなる(self):
+        # confirmed_from は findings しか見ないので、台帳が
+        # きれいになれば confirmed 側の個別対応は要らない
+        led = self._ledger()
+        for junk in self.case["url_noise"]["must_not_pass"]:
+            with self.subTest(value=junk):
+                self.assertEqual(
+                    self.numeric.confirmed_from(f"利益率は{junk} [実績] でした。", led), [],
+                    f"URL由来の {junk} が confirmed に入る")
+        # 本物は今までどおり確定済みになる
+        conf = self.numeric.confirmed_from("営業利益は9.2兆ウォン [実績] でした。", led)
+        self.assertEqual([c["raw"] for c in conf], ["9.2兆ウォン"])
+
+    def test_台帳の枠をゴミが食わない(self):
+        # merge_findings の上限は40件。URLのゴミが入ると本物が押し出される
+        led = self._ledger()
+        self.assertLessEqual(len(self._numbers(led)), 10,
+                             "1ページの数値が多すぎる（URLのゴミが残っている）")

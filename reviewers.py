@@ -9,7 +9,7 @@ from numeric import (
     dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
     label_value_mismatches, candidates_for, tag_conflicts,
     appears_verbatim, labeled_values, primary_label, TRUNCATION_MARK,
-    candidate_suggestion, ohlc_values, matches_bare, source_texts,
+    candidate_suggestion, ohlc_values, matches_bare, source_texts, mask_urls,
 )
 
 
@@ -357,7 +357,8 @@ def _history_numbers(history: list, sources: list = None) -> list[dict]:
     ここは置換候補の母集団でもある。内部メッセージを混ぜると、correct が
     却下したばかりの値を「候補」として提案し返すことになる。
     """
-    texts = source_texts(history)
+    # URLは潰す。潰さないと %XX が「XX%」として候補に並び、照合も素通りする
+    texts = [mask_urls(t) for t in source_texts(history)]
     numbers = []
     for t in texts:
         numbers.extend(extract_numbers(t))
@@ -427,11 +428,13 @@ def numeric_checker(output: str, history: list = None, sources: list = None,
     # 履歴からは出典由来のものだけを採る。correct / critic の差し戻し文には
     # 却下した数値がそのまま引用されているので、混ぜるとその値が
     # 「出典にある」ことになり、次のラウンドで素通りする。
-    src_texts = (
+    # URLは潰しておく。潰さないと、回答の「88%」が出典URLの
+    # パーセントエンコーディング（%E5 等）と一致して「出典にある」ことになる
+    src_texts = [mask_urls(t) for t in (
         source_texts(history)
         + [f.get("context", "") for f in (findings or [])]
         + [s.get("excerpt", "") for s in (sources or [])]
-    )
+    )]
     # 元ページが取得上限で切れていたか。抜粋に印は残らないので、
     # 構造化フィールドを正とし、印は後方互換のために併せて見る
     truncated = (any(s.get("source_truncated") for s in (sources or []))

@@ -188,11 +188,41 @@ def matches_any(entry: dict, candidates: list[dict]) -> bool:
     return False
 
 
+# URL。数値抽出の前に潰す範囲。
+#
+# 検索結果は「URL: https://…」の行を含んだまま collect_from_text に渡る。
+# パーセントエンコーディングの %XX が全部「XX%」として拾われるため、
+# 1本のURLで9件のゴミが台帳に入る（実測）。害は3方向に出る。
+#   1. merge_findings の上限40件をゴミが食い、本物の数値が押し出される
+#   2. 照合の母集団に入るので、回答の「88%」がURLのバイト列と一致して通る
+#   3. 置換候補として提案される
+# confirmed も台帳から作られるので、ここを塞げば汚染は連鎖的に止まる。
+URL_RE = re.compile(r"https?://\S+")
+
+
+def mask_urls(text: str) -> str:
+    """URLを同じ長さの空白に置き換える。
+
+    削除ではなく空白で潰すのは、extract_numbers が返す start / end を
+    元テキスト上の位置として保つため。タグの読み取り（tag_after）が
+    位置に依存している。
+
+    テキストごと捨てないのは、「URL: …\n概要: 営業利益は9.2兆ウォン」の
+    ように1つの文字列にURLと本文が同居しているため。まとめて弾くと
+    本物の数値まで落ちる（報告A と同じ事故になる）。
+    """
+    return URL_RE.sub(lambda m: " " * len(m.group(0)), text or "")
+
+
 def collect_from_text(text: str, source: str = "", step: int = 0) -> list[dict]:
     """
     テキストから数値台帳（findings）用のエントリを作る。
     数値と日付の両方を拾う。
+
+    URLは数値として拾わない（mask_urls）。呼び出し元4箇所すべてが
+    検索結果か取得本文なので、ここで塞げば台帳は一律にきれいになる。
     """
+    text = mask_urls(text)
     items = []
     for n in extract_numbers(text):
         # 実績か予想かは収集の時点で機械的に決めておく。書く側の判断に

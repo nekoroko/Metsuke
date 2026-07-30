@@ -1,0 +1,11 @@
+タイトル: SKハイニックス、4-6月期の営業利益が過去最高
+URL: https://news.example.com/articles/2026/07/28/%E5%96%B6%E6%A5%AD%E5%88%A9%E7%9B%8A?page=2&ref=%E6%B1%BA%E7%AE%97
+概要: SKハイニックスの2026年4-6月期の営業利益は9.2兆ウォンだった。前年同期比で557%の増加。
+---
+タイトル: SK하이닉스 주가 - 실시간 시세
+URL: https://finance.example.co.kr/search?query=SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4&page=2&per=50%25
+概要: 28일 종가는 마이너스 14.65 퍼센트였다. 매출은 79조3000억원.
+---
+タイトル: 000660.KS 過去のデータ
+URL: https://finance.example.com/quote/000660.KS/history?period1=1753660800&period2=1754265600&interval=1d
+概要: 終値130.17ドル、始値135.91ドル。
