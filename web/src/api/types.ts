@@ -140,3 +140,11 @@ export interface ProfileTestResult {
   sample?: string
   error?: string
 }
+
+/** サンドボックスの追加マウント1行の下見結果。rejected が入っていたら使われない。 */
+export interface MountCheck {
+  host: string
+  container: string
+  mode: string
+  rejected: string
+}

@@ -328,3 +328,61 @@ class TestMeta(_ApiCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSecretsAtRest(_ApiCase):
+    """
+    APIキーは平文でDBに入る（設計上の選択）。だからこそ、置き場所と
+    権限、そしてコンテナから見えないことを固定する。
+    """
+
+    def test_DBは所有者しか読めない(self):
+        import paths
+        paths.secure_db_file(self.path)
+        mode = os.stat(self.path).st_mode & 0o777
+        self.assertEqual(mode, 0o600, f"DBの権限が {oct(mode)} になっている")
+
+    def test_既定の置き場所はリポジトリの外(self):
+        # 作業ディレクトリごと扱われる操作（サンドボックスへのマウント、
+        # バックアップ、コピー）に鍵を巻き込まないため
+        import paths
+        default = paths._default_db_path()
+        self.assertNotIn(paths.BASE_DIR, default)
+        self.assertIn("agent-studio", default)
+
+    def test_設定DBが見えるマウントは却下する(self):
+        import paths
+        import sandbox
+        for path in (paths.DB_PATH,
+                     os.path.dirname(paths.DB_PATH),
+                     os.path.dirname(os.path.dirname(paths.DB_PATH))):
+            with self.subTest(path=path):
+                self.assertTrue(sandbox.exposes_secrets(path))
+                self.assertEqual(sandbox.parse_mounts(path), [])
+                self.assertTrue(sandbox.check_mounts(path)[0]["rejected"])
+
+    def test_無関係なマウントは通す(self):
+        import sandbox
+        got = sandbox.parse_mounts("/var/log/app:/logs:ro")
+        self.assertEqual(got, [("/var/log/app", "/logs", "ro")])
+        self.assertEqual(sandbox.check_mounts("/var/log/app")[0]["rejected"], "")
+
+    def test_却下と許可が混ざっても許可分だけ残る(self):
+        import paths
+        import sandbox
+        text = f"{paths.DB_PATH}\n/var/log/app:/logs:ro"
+        self.assertEqual(sandbox.parse_mounts(text),
+                         [("/var/log/app", "/logs", "ro")])
+
+    def test_下見APIが理由を返す(self):
+        import paths
+        r = self.client.post("/api/settings/check-mounts",
+                             json={"text": paths.DB_PATH}).json()
+        self.assertEqual(len(r), 1)
+        self.assertIn("設定DB", r[0]["rejected"])
+
+    def test_下見APIは普通の指定を通す(self):
+        r = self.client.post("/api/settings/check-mounts",
+                             json={"text": "/var/log/app:/logs:rw"}).json()
+        self.assertEqual(r[0]["rejected"], "")
+        self.assertEqual(r[0]["mode"], "rw")

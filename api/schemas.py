@@ -157,3 +157,7 @@ class DefaultProfileIn(BaseModel):
 
 class SettingsIn(BaseModel):
     values: dict[str, Any]
+
+
+class MountsIn(BaseModel):
+    text: str = ""

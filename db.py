@@ -3,7 +3,7 @@ import sqlite3
 import uuid
 import json
 from datetime import datetime
-from paths import DB_PATH  # 実行CWDに依存しない絶対パス（paths.py参照）
+from paths import DB_PATH, ensure_db_location, secure_db_file  # paths.py参照
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -11,6 +11,8 @@ def get_connection():
     return conn
 
 def init_db():
+    # 置き場所の用意と旧位置からの引っ越し。接続より前に済ませる
+    ensure_db_location()
     conn = get_connection()
 
     # ツールライブラリ（Type 1用：保存済みコード）
@@ -187,6 +189,8 @@ def init_db():
     _migrate_llm_profile(conn)
     conn.commit()
     conn.close()
+    # sqlite が作ったファイルは既定 0644。APIキーが入るので 0600 に落とす
+    secure_db_file()
 
 
 def _migrate_llm_profile(conn):

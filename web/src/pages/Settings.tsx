@@ -12,7 +12,7 @@ import { Cloud, MonitorSmartphone, Plug, Trash2 } from 'lucide-react'
 
 import { api } from '../api/client'
 import { keys, useInvalidate, useLlmProfiles, useSettings } from '../api/hooks'
-import type { LlmProfile, ProfileTestResult } from '../api/types'
+import type { LlmProfile, MountCheck, ProfileTestResult } from '../api/types'
 import { Empty, Kicker, Tag } from '../components/ui'
 
 const SECTIONS = [
@@ -540,10 +540,29 @@ function SandboxSection() {
   const invalidate = useInvalidate()
   const [mounts, setMounts] = useState('')
   const [saved, setSaved] = useState(false)
+  const [checked, setChecked] = useState<MountCheck[]>([])
 
   useEffect(() => {
     if (settings.data) setMounts(settings.data.sandbox_extra_mounts ?? '')
   }, [settings.data])
+
+  // 入力のたびにサーバへ下見を投げる。パスの解決（realpath）は
+  // サーバ側でしかできないので、画面で判定しない
+  useEffect(() => {
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await api.settings.checkMounts(mounts)
+        if (!cancelled) setChecked(result)
+      } catch {
+        if (!cancelled) setChecked([])
+      }
+    }, 300)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [mounts])
 
   return (
     <>
@@ -581,9 +600,36 @@ function SandboxSection() {
               作業ディレクトリ以外のホストファイルに触るツールはここで指定します。
             </div>
           </div>
+          {checked.length > 0 && (
+            <div>
+              <Kicker>この設定でどうなるか</Kicker>
+              <table className="grid" style={{ marginTop: 6 }}>
+                <thead>
+                  <tr><th>ホスト側</th><th>コンテナ側</th><th>権限</th><th>結果</th></tr>
+                </thead>
+                <tbody>
+                  {checked.map((m, i) => (
+                    <tr key={i}>
+                      <td className="mono" style={{ fontSize: 11.5 }}>{m.host}</td>
+                      <td className="mono" style={{ fontSize: 11.5 }}>{m.container}</td>
+                      <td className="mono cell-nowrap">{m.mode}</td>
+                      <td>
+                        {m.rejected
+                          ? <Tag kind="accent">却下</Tag>
+                          : <Tag kind="neutral">マウントする</Tag>}
+                        {m.rejected && <div className="cell-sub">{m.rejected}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           <div className="notice">
-            agent_studio.db はマウントしないでください。LLMプロバイダの APIキーが
-            平文で入っています。
+            設定DBが見える指定は自動で却下します。DBにはLLMプロバイダの
+            APIキーが平文で入っており、コンテナの中で動くのは AI が生成した
+            コードだからです。親ディレクトリを指定した場合も同じく落とします。
           </div>
         </div>
       </div>

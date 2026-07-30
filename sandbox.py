@@ -15,7 +15,7 @@ import tempfile
 import threading
 import os
 
-from paths import BASE_DIR
+from paths import BASE_DIR, DB_PATH
 from tool_runtime import requirements_hash
 from settings_store import read_settings
 
@@ -191,6 +191,35 @@ def build_sandbox_env() -> dict:
     return env
 
 
+def exposes_secrets(host_path: str) -> bool:
+    """
+    そのホストパスをマウントすると、設定DBがコンテナから見えるか。
+
+    設定DBにはLLMプロバイダのAPIキーが平文で入っている。サンドボックスの
+    中で動くのは**AIが生成したコード**なので、DBが見える状態にすると
+    「生成コードが鍵を読んで外へ送る」経路が開く。ネットワークを許可した
+    実行なら、そのまま持ち出せる。
+
+    親ディレクトリの指定でも見えてしまうので、パスの前方一致で見る。
+    ファイル単体の指定（DBそのもの）も同じ判定に含まれる。
+    """
+    if not host_path:
+        return False
+    try:
+        target = os.path.realpath(os.path.expanduser(host_path))
+        db = os.path.realpath(DB_PATH)
+    except OSError:
+        return False
+    if target == db:
+        return True
+    # 親ディレクトリを渡された場合。os.path.commonpath は区切りの扱いを
+    # 誤らないので、文字列の startswith ではなくこちらを使う
+    try:
+        return os.path.commonpath([target, db]) == target
+    except ValueError:
+        return False          # ドライブが違う等、比較できない場合は無関係
+
+
 def parse_mounts(text: str) -> list:
     """
     追加マウント設定を解析する。1行1マウントで、以下の形式。
@@ -203,8 +232,22 @@ def parse_mounts(text: str) -> list:
     ファイル（ログ、CSV等）に触るツールはマウント指定が必須になる。
     ツール個別ではなく全体設定にしているのは、実行経路ごとに権限が
     バラつくのを避けるため。
+
+    **設定DBが見える指定は落とす。** 誤って親ディレクトリを書いた場合も
+    含めて、ここで止める（DBには平文のAPIキーが入っており、コンテナの中で
+    動くのはAIが生成したコード）。落としたことは戻り値に出ないので、
+    UI 側は check_mounts で理由つきの一覧を出すこと。
     """
     mounts = []
+    for host, container, mode, rejected in _parse_mount_lines(text):
+        if rejected:
+            continue
+        mounts.append((host, container, mode))
+    return mounts
+
+
+def _parse_mount_lines(text: str):
+    """1行ずつ (host, container, mode, 却下理由) を返す内部関数。"""
     for line in (text or "").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -217,8 +260,23 @@ def parse_mounts(text: str) -> list:
         mode = parts[2] if len(parts) > 2 and parts[2] else "ro"
         if mode not in ("ro", "rw"):
             mode = "ro"
-        mounts.append((host, container, mode))
-    return mounts
+        rejected = ""
+        if exposes_secrets(host):
+            rejected = ("設定DB（APIキーを平文で保持）がコンテナから見えるため"
+                        "マウントしません")
+        yield host, container, mode, rejected
+
+
+def check_mounts(text: str) -> list[dict]:
+    """
+    UI表示用。各行の解析結果と、却下した場合はその理由を返す。
+
+    黙って落とすと「書いたのにマウントされない」という分かりにくい
+    状態になるので、画面に理由を出せるようにしておく。
+    """
+    return [{"host": host, "container": container, "mode": mode,
+             "rejected": rejected}
+            for host, container, mode, rejected in _parse_mount_lines(text)]
 
 
 def configured_mounts() -> list:

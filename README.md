@@ -400,7 +400,7 @@ agent-studio/
     page_settings.py  設定
 
 共通/
-  paths.py                設定DBの場所を一元管理（唯一の定義箇所）
+  paths.py                設定DBの場所と権限を一元管理（唯一の定義箇所）
   settings_store.py       設定DBの読み取り（config/tools/sandboxが共用）
   tool_runtime.py         ライブラリ定義の読み書き・プロンプト生成・ハッシュ
   Containerfile           サンドボックス実行用イメージの定義

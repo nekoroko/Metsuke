@@ -3,7 +3,7 @@
 // ここには表示の都合を持ち込まない。サーバが返した形をそのまま渡す。
 
 import type {
-  AgentTask, Execution, LlmProfile, Meta, ProfileTestResult, RunEvent,
+  AgentTask, Execution, LlmProfile, Meta, MountCheck, ProfileTestResult, RunEvent,
   Schedule, Tool,
 } from './types'
 
@@ -92,6 +92,8 @@ export const api = {
   settings: {
     get: () => get<Record<string, string>>('/settings'),
     put: (values: Record<string, string>) => put<Record<string, string>>('/settings', { values }),
+    checkMounts: (text: string) =>
+      post<MountCheck[]>('/settings/check-mounts', { text }),
   },
 }
 

@@ -14,7 +14,7 @@ import db
 import graphs
 import llm_profiles
 from api.schemas import (
-    DefaultProfileIn, LlmProfileIn, LlmProfilePatch, SECRET_SETTING_KEYS,
+    DefaultProfileIn, LlmProfileIn, LlmProfilePatch, MountsIn, SECRET_SETTING_KEYS,
     SettingsIn, mask_settings, public_profile,
 )
 
@@ -158,6 +158,19 @@ def set_default_profile(body: DefaultProfileIn):
 
 
 # ===== 設定 =====
+
+@router.post("/settings/check-mounts")
+def check_mounts(body: MountsIn):
+    """
+    追加マウントの下見。設定DBが見える行は却下し、その理由を返す。
+
+    黙って落とすと「書いたのにマウントされない」という分かりにくい
+    状態になるので、保存前に画面へ理由を出せるようにしておく。
+    パスの解決はサーバ側でしかできない（realpath が要る）。
+    """
+    from sandbox import check_mounts as _check
+    return _check(body.text)
+
 
 @router.get("/settings")
 def get_settings():
