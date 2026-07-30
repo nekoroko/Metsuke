@@ -11,8 +11,8 @@ Web GUIからツールを作成・管理し、スケジュール実行できま�
 エージェントが出した答えをそのまま返さず、別のレビュアーが数値と出典を
 機械的に照合してから返す、というこのアプリの作りに由来します。
 
-リポジトリ名・ディレクトリ名（`agent-studio` / `agent-project`）と、
-以下の内部識別子は**旧名のまま**です。
+リポジトリは `nekoroko/Metsuke` に改名済みです。一方、**以下の内部識別子は
+旧名（`agent-studio` / `agent_studio`）のまま**にしてあります。
 
 | 種類 | 値 |
 |---|---|
@@ -23,8 +23,20 @@ Web GUIからツールを作成・管理し、スケジュール実行できま�
 | Pythonのモジュール名 | `db.py` / `config.py` など（変更なし） |
 
 これらを変えると、すでに動いている環境で保存済みの設定・タスク・実行履歴が
-見つからなくなります。**表示名だけを Metsuke に変え、データの互換性は
-保っています。**
+見つからなくなります。**表示名とリポジトリ名だけを Metsuke に変え、
+データの互換性は保っています。**
+
+### すでにクローン済みの場合
+
+リポジトリ名を変えると旧URLはリダイレクトされますが、リモートは明示的に
+書き換えておくのが安全です。
+
+```bash
+git remote set-url origin https://github.com/nekoroko/Metsuke.git
+```
+
+ローカルのディレクトリ名（`~/agent-studio` など）は、そのままで動きます。
+DBの場所はディレクトリ名に依存しません。
 
 ## 構成
 
@@ -32,11 +44,15 @@ Web GUIからツールを作成・管理し、スケジュール実行できま�
 
 ```
 agent-project/   ReActエージェントのコア（LLM呼び出し、ツール、レビュアー）
-agent-studio/    Web GUI（Streamlit）、DB、スケジューラ
+Metsuke/         Web GUI、DB、スケジューラ（旧 agent-studio）
 ```
 
-`agent-studio` は `sys.path` 経由で `agent-project` を読み込んで動きます。
+`Metsuke` は `sys.path` 経由で `agent-project` を読み込んで動きます。
 `agent-project` 単体でもCLIから直接エージェントを動かせます（`run.py`）。
+
+以降の手順では、クローン先のディレクトリ名を `Metsuke` と書きます。
+改名前にクローンした環境では `agent-studio` のままで構いません
+（ディレクトリ名に依存する処理はありません）。
 
 ## 動作要件
 
@@ -78,10 +94,10 @@ source .venv/bin/activate   # Windowsは .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. agent-studio
+### 2. Metsuke
 
 ```bash
-cd agent-studio
+cd Metsuke
 source ../agent-project/.venv/bin/activate  # venvは共有してOK
 pip install -r requirements.txt
 ```
@@ -147,7 +163,7 @@ podman build -t agent-studio-sandbox:latest .
 
 DBの場所は `paths.py` で一元管理しており、実行時のカレントディレクトリに
 依存しません（`paths.py` と同じディレクトリに置かれます）。
-`agent-project` と `agent-studio` を別ディレクトリに分けて運用する場合は、
+`agent-project` と `Metsuke` を別ディレクトリに分けて運用する場合は、
 環境変数 `AGENT_STUDIO_DB` で明示的にパスを指定してください。
 
 #### ローカルLLMサーバーの選択肢
@@ -391,7 +407,7 @@ agent-project/
   sandbox.py      Podmanサンドボックス実行
   run.py          CLIから直接実行する場合のエントリポイント
 
-agent-studio/
+Metsuke/
   config.py       LLM接続設定（agent-projectと同一内容）
   db.py           SQLite（ツール、タスク、スケジュール、実行履歴、設定）
   executor.py     ツール実行・エージェント実行（バックグラウンド対応）
