@@ -123,7 +123,7 @@ function ModelsSection() {
               <th style={{ width: 200 }}>接続先</th>
               <th style={{ width: 92 }}>上限</th>
               <th style={{ width: 130 }}>状態</th>
-              <th style={{ width: 120 }} />
+              <th style={{ width: 1 }} />
             </tr>
           </thead>
           <tbody>

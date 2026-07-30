@@ -126,7 +126,18 @@ button { font-family: inherit; }
  * （.main-scroll は flex アイテムとして高さが確定しているので % が効く）。 */
 .main-scroll { flex: 1; min-height: 0; overflow: auto; }
 
+/* ページ見出しは常に固定。スクロールしても「今どの画面か」と
+ * 主要な操作（実行・追加・保存）が見えている状態を保つ。
+ *
+ * position:sticky はレイアウトの流れを変えないので、以前
+ * .main-scroll を flex column にして全ページを壊したときのような
+ * 副作用が出ない。スクロールする器（.main-scroll / 設定・ヘルプの
+ * 右ペイン）の直下にあれば効く。 */
 .page-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--color-bg);
   padding: 18px var(--space-6) 14px;
   border-bottom: 2px solid var(--color-divider);
   display: flex;
@@ -134,6 +145,10 @@ button { font-family: inherit; }
   justify-content: space-between;
   gap: var(--space-4);
 }
+
+/* フィルタ行は固定しない。sticky には top の実値が要るが、ヘッダーの
+ * 高さは可変（.roomy で見出しが 26px→34px になる）で、当て推量の値を
+ * 置くと条件次第で隙間や重なりが出る。ヘッダーだけを固定する。 */
 .page-header.roomy { padding: var(--space-8) 40px var(--space-6); }
 .page-title { margin: 0; font: 800 26px/1.1 var(--font-heading); }
 .page-header.roomy .page-title { font-size: 34px; }
@@ -169,7 +184,11 @@ button { font-family: inherit; }
 
 /* ===== フィルタ行 ===== */
 
-.filters { display: flex; background: var(--color-surface); border-bottom: 2px solid var(--color-divider); }
+.filters {
+  display: flex;
+  background: var(--color-surface);
+  border-bottom: 2px solid var(--color-divider);
+}
 .filter {
   padding: 10px var(--space-4);
   font: 400 12.5px var(--font-heading);
@@ -228,6 +247,11 @@ table.grid tbody tr:hover { background: color-mix(in srgb, var(--color-text) 4%,
 
 /* 一覧の行内ボタンは小さめ（手順書 5.1） */
 .btn.btn-sm { font-size: 12px; padding: 4px 10px; }
+
+/* ボタンのラベルは折り返さない。列が狭いと「既定に」が1文字ずつ
+ * 縦に割れる（実際にそうなった）。行内の操作ボタンは縮ませない */
+.btn { white-space: nowrap; }
+.row-actions > * { flex: none; }
 
 /* ===== カード ===== */
 
