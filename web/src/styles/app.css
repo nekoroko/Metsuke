@@ -117,10 +117,14 @@ button { font-family: inherit; }
 .sidebar-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-/* 通常のページは縦に伸びてここがスクロールする。実行詳細だけは
- * .run-page が flex:1 で高さを取り、内側の枠が個別にスクロールする */
-.main-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
-.main-scroll > * { min-height: 0; }
+/* 通常のページは縦に伸びて、ここがスクロールする。
+ *
+ * 一時期ここを flex column にしていたが、flex の子は既定で縮む
+ * （flex-shrink:1）ため、ヘッダー・フィルタ行・テーブルが押し潰されて
+ * 重なった。全ページに影響する。高さを埋めたいのは実行詳細だけなので、
+ * こちらは素の overflow に戻し、あちらは height:100% で高さを取る
+ * （.main-scroll は flex アイテムとして高さが確定しているので % が効く）。 */
+.main-scroll { flex: 1; min-height: 0; overflow: auto; }
 
 .page-header {
   padding: 18px var(--space-6) 14px;
@@ -572,7 +576,7 @@ textarea.input { font-family: 'Roboto Mono', ui-monospace, monospace; font-size:
  * （外側の .main-scroll に任せると、ヘッダーごと流れてしまう）。
  */
 
-.run-page { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.run-page { display: flex; flex-direction: column; height: 100%; }
 .run-header { flex: none; }
 
 .split { display: flex; flex: 1; min-height: 0; min-width: 0; }
