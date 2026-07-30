@@ -7,6 +7,7 @@ import json
 import streamlit as st
 
 import graphs
+import llm_profiles
 from db import get_executions
 from trace_view import (
     format_trace_lines,
@@ -18,12 +19,29 @@ from trace_view import (
 from ui.common import badge
 
 
+def parse_llm_info(raw) -> dict:
+    """executions.llm_info（JSON）を読む。無い・壊れていれば空dict。"""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        info = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
 def build_export_text(execution: dict, history: list = None, trace: list = None) -> str:
     """
-    実行結果とReActループ履歴を1つのテキストにまとめる。
+    実行結果とエージェントの実行履歴を1つのテキストにまとめる。
 
     st.code に渡すとStreamlitが標準でコピーアイコンを付けるため、
     追加のJavaScriptなしで一括コピーできる。
+
+    モデル名を入れているのは、貼って比較するときに「どのモデルの結果か」が
+    テキスト単体で分かる必要があるため。api_key は llm_info に入っていない
+    （llm_profiles.SNAPSHOT_FIELDS の時点で除いてある）。
     """
     e = execution
     lines = [
@@ -36,6 +54,21 @@ def build_export_text(execution: dict, history: list = None, trace: list = None)
     ]
     if e.get("finished_at"):
         lines.append(f"- 完了: {e['finished_at']}")
+
+    run_name = graphs.run_label(e.get("graph_kind"), trace)
+    if run_name:
+        lines.append(f"- グラフ: {run_name}")
+
+    info = parse_llm_info(e.get("llm_info"))
+    if info:
+        lines.append(f"- モデル: {llm_profiles.snapshot_label(info)}")
+        tokens = str(info.get("max_output_tokens") or "").strip()
+        if tokens:
+            lines.append(f"- 最大出力トークン: {tokens}")
+        lines.append(
+            "- Thinking: "
+            + ("無効" if (info.get("disable_thinking") or "true") == "true" else "有効")
+        )
 
     if e.get("stdout"):
         lines += ["", "## 出力", "", e["stdout"]]
@@ -110,13 +143,17 @@ def render():
             run_name = graphs.run_label(e.get("graph_kind"), trace)
             log_name = graphs.log_title(e.get("graph_kind"), trace)
             graph_badge = f' {badge("muted", run_name)}' if run_name else ""
+            llm_info = parse_llm_info(e.get("llm_info"))
+            model_name = (llm_info.get("model") or "").strip()
+            model_badge = f' {badge("muted", model_name)}' if model_name else ""
 
             with st.container(border=True):
                 head_l, head_r = st.columns([5, 2])
                 with head_l:
                     st.markdown(
                         f'<p class="as-card-title">{t_icon} {e.get("target_name", "?")} '
-                        f'{badge(e["status"])} {badge("muted", t_label)}{graph_badge}</p>'
+                        f'{badge(e["status"])} {badge("muted", t_label)}'
+                        f'{graph_badge}{model_badge}</p>'
                         f'<p class="as-meta">開始 {e["started_at"][:19]}'
                         + (f' / 完了 {e["finished_at"][:19]}' if e.get("finished_at") else "")
                         + "</p>",

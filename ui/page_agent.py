@@ -7,6 +7,7 @@ import json
 import streamlit as st
 
 import graphs
+import llm_profiles
 from db import (
     get_all_agent_tasks, update_agent_task, delete_agent_task,
     get_verified_tools, get_execution,
@@ -92,13 +93,41 @@ def render():
                 if edited_kind != "default":
                     st.caption(graphs.GRAPH_DESCRIPTIONS[edited_kind])
 
+                # 使用するモデル（未指定なら設定画面の既定に従う）。
+                # グラフと同じ3層（既定 / タスク個別 / いま画面で選んだもの）
+                profiles = llm_profiles.profiles()
+                by_id = {p["id"]: p for p in profiles}
+                default_profile = by_id.get(llm_profiles.default_profile_id())
+                profile_options = [llm_profiles.DEFAULT] + [p["id"] for p in profiles]
+                current_profile = (t.get("llm_profile_id") or llm_profiles.DEFAULT).strip()
+                if current_profile not in profile_options:
+                    current_profile = llm_profiles.DEFAULT
+                edited_profile = st.selectbox(
+                    "使用するモデル",
+                    options=profile_options,
+                    index=profile_options.index(current_profile),
+                    format_func=lambda pid: (
+                        "設定の既定に従う"
+                        + (f"（{llm_profiles.profile_label(default_profile)}）"
+                           if default_profile else "")
+                        if pid == llm_profiles.DEFAULT
+                        else llm_profiles.profile_label(by_id[pid])
+                    ),
+                    key=f"alp_{t['id']}",
+                    help="保存すればこのタスクの既定になります。保存せずに実行すると、"
+                         "今回だけこのモデルで走ります。",
+                )
+                if edited_profile != llm_profiles.DEFAULT:
+                    st.caption(llm_profiles.profile_summary(by_id[edited_profile]))
+
                 col1, col2, col3 = st.columns(3)
                 run_clicked = col1.button("▶ 実行（バックグラウンド）", key=f"ar_{t['id']}")
                 save_clicked = False
                 prompt_changed = edited_prompt != t["task_prompt"]
                 tools_changed = set(edited_tool_ids) != set(current_tool_ids)
                 kind_changed = edited_kind != current_kind
-                if prompt_changed or tools_changed or kind_changed:
+                profile_changed = edited_profile != current_profile
+                if prompt_changed or tools_changed or kind_changed or profile_changed:
                     save_clicked = col2.button("💾 保存", key=f"as_{t['id']}")
                 delete_clicked = col3.button("🗑️", key=f"ad_{t['id']}")
 
@@ -108,6 +137,8 @@ def render():
                     exec_id = run_agent_now(
                         t["id"], t["name"], edited_prompt,
                         graph_kind=None if edited_kind == "default" else edited_kind,
+                        llm_profile_id=(None if edited_profile == llm_profiles.DEFAULT
+                                        else edited_profile),
                     )
                     st.session_state[f"running_exec_{t['id']}"] = exec_id
                     st.success(f"バックグラウンド実行を開始しました（exec_id: {exec_id}）")
@@ -131,9 +162,13 @@ def render():
                         st.markdown(f"### {s_icon} ステータス: {status}")
                         run_trace = parse_trace(exec_data.get("trace"))
                         run_name = graphs.run_label(exec_data.get("graph_kind"), run_trace)
+                        from ui.page_history import parse_llm_info
+                        run_model = llm_profiles.snapshot_label(
+                            parse_llm_info(exec_data.get("llm_info")))
                         st.caption(
                             f"exec_id: {running_exec_id}"
                             + (f" | グラフ: {run_name}" if run_name else "")
+                            + (f" | モデル: {run_model}" if run_model else "")
                             + f" | 開始: {exec_data['started_at'][:19]}"
                         )
                         if exec_data.get("finished_at"):
@@ -196,6 +231,8 @@ def render():
                         task_prompt=edited_prompt,
                         allowed_tool_ids=edited_tool_ids if edited_tool_ids else None,
                         graph_kind=None if edited_kind == "default" else edited_kind,
+                        llm_profile_id=(None if edited_profile == llm_profiles.DEFAULT
+                                        else edited_profile),
                     )
                     st.rerun()
                 if delete_clicked:

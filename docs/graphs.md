@@ -111,3 +111,79 @@ trace を持たない古い履歴を区別できないため。判別できな�
 `_ask` / `web_search` / `fetch_url` を差し替えて、各ノードの入出力、
 失敗時のフォールバック、遷移先を確認する。ルーティングは
 `NODES` / `ROUTES` の定義から「遷移先が未登録のノードを指していないか」を検査する。
+
+---
+
+# LLM接続プロファイル（複数保存 + 実行時選択）
+
+## なぜ
+
+接続設定は settings の `local_*` / `api_*` に1組だけ持っていた。モデルを変えて
+比べるには上書きするしかなく、前の設定が失われる。Gemma 4 と Qwen 3.5 で
+同じタスクを流して比べる、といった使い方ができなかった。
+
+## 構造
+
+役割は `graphs.py` と対になっている。グラフの選び方と同じ形にしてあるので、
+片方を読めばもう片方も読める。
+
+| | グラフ | モデル |
+|---|---|---|
+| 定義・解決 | `graphs.py` | `llm_profiles.py` |
+| 保存先 | `settings.default_graph_kind` | `llm_profiles` テーブル + `settings.default_llm_profile_id` |
+| タスク個別 | `agent_tasks.graph_kind` | `agent_tasks.llm_profile_id` |
+| 実行時の上書き | `run_agent_now(graph_kind=...)` | `run_agent_now(llm_profile_id=...)` |
+| 解決 | `graphs.resolve_kind` | `llm_profiles.resolve_profile` |
+| 履歴への記録 | `executions.graph_kind` | `executions.llm_info`（JSON） |
+
+優先順位はどちらも **実行時の指定 > タスク個別 > 設定画面の既定**。
+
+## get_llm() への渡し方
+
+`get_llm()` はグラフの各ノードから直接呼ばれる（十数箇所）。引数で引き回すと
+全ノードのシグネチャが変わるので、実行の外側で「今どのプロファイルか」を立てて
+`get_llm()` 側が見る形にした。
+
+```python
+with config.use_profile(profile):
+    for step in app.stream(state):
+        ...
+```
+
+- **thread-local** にしている。スケジューラのジョブと Streamlit の画面は別スレッドで
+  同時に走るため、モジュール変数だと片方の実行がもう片方のモデルを差し替える。
+- **回すところを1箇所に寄せた**（`executor._agent_steps`）。3つの実行経路それぞれで
+  `with` を書くと、どれか1つで書き漏らしたときに黙って既定のモデルで走る。
+  `TestExecutorWiring` が「`.stream(` は1箇所だけ」を構造として固定している。
+
+## 設定はプロファイル側へ一本化した
+
+初回起動時に、それまでの `local_*` / `api_*` から1件を自動で作る（`db._migrate_llm_profile`）。
+移行元のキーは消さずに残すが、編集経路は無くなる。
+
+`config._effective_settings()` は、実行中のプロファイルが無い場合も**既定の
+プロファイル**を重ねる。こうしないと「設定画面で編集した値と、ツール生成AIが
+使う値が食い違う」状態になる。プロファイルが1件も無いとき（DBが読めない等）だけ
+従来のキーが効く。
+
+## APIキーは履歴に出さない
+
+`executions.llm_info` に入れるのは `llm_profiles.SNAPSHOT_FIELDS` だけで、
+**`api_key` を含めない。** 履歴の「まとめてコピー」はそのまま外へ貼られる
+前提のテキストなので、鍵が1度混ざると貼った先すべてから消す必要が出る。
+`TestApiKeyNeverLeaves` が、写し・DB・コピー用テキストの3段で固定している。
+
+IDではなく値を写して持つのは、後でプロファイルを編集・削除したときに
+「何で実行したか」が分からなくなるため。
+
+## 削除の扱い
+
+最後の1件は削除できない（0件になると実行時に選ぶものが無くなる）。
+既定に選ばれていたものを削除したら、残っているものへ付け替える。
+タスク側が消えたIDを指していても、`resolve_profile_id` が既定へ落とすので
+実行は止まらない。
+
+## verify_run.py
+
+`--list-profiles` で一覧、`--profile <名前かID>` で選んで実行できる。
+モデルを変えた実測の比較に使う。

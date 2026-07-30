@@ -71,20 +71,20 @@ def remove_job(schedule_id: str):
         scheduler.remove_job(job_id)
 
 def run_agent_now(task_id: str, task_name: str, task_prompt: str,
-                  graph_kind: str = None) -> str:
+                  graph_kind: str = None, llm_profile_id: str = None) -> str:
     """
     エージェントタスクを即時バックグラウンド実行する。
 
-    graph_kind を渡すと、そのグラフで実行する。画面で選び直した直後に
-    保存していなくても、その選択で走らせられるようにするための引数。
-    未指定ならタスクの保存値、それも無ければ設定画面の既定に従う。
+    graph_kind / llm_profile_id を渡すと、そのグラフ・そのモデルで実行する。
+    画面で選び直した直後に保存していなくても、その選択で走らせられるように
+    するための引数。未指定ならタスクの保存値、それも無ければ設定画面の既定に従う。
     """
     exec_id = add_execution("agent", task_id, task_name, trigger="manual")
     scheduler.add_job(
         run_agent_background,
         trigger='date',
         run_date=datetime.now(),
-        args=[exec_id, task_prompt, task_id, graph_kind],
+        args=[exec_id, task_prompt, task_id, graph_kind, llm_profile_id],
         id=f"now_{exec_id}",
         replace_existing=False,
     )

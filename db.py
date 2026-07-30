@@ -48,6 +48,9 @@ def init_db():
     # graph_kind: 空/NULLなら設定画面の既定に従う（graphs.resolve_kind）
     if "graph_kind" not in cols:
         conn.execute("ALTER TABLE agent_tasks ADD COLUMN graph_kind TEXT")
+    # どのLLMプロファイルで実行するか（空なら設定画面の既定に従う）
+    if "llm_profile_id" not in cols:
+        conn.execute("ALTER TABLE agent_tasks ADD COLUMN llm_profile_id TEXT")
 
     # スケジュール（Type 1/Type 2両方）
     conn.execute("""
@@ -89,6 +92,11 @@ def init_db():
     # どのグラフで実行したか。履歴画面の見出しに使う
     if "graph_kind" not in exec_cols:
         conn.execute("ALTER TABLE executions ADD COLUMN graph_kind TEXT")
+    # どのモデルで実行したか（JSON）。プロファイルIDだけでは、後から
+    # 編集・削除されたときに何で実行したか分からなくなるため値を写して持つ。
+    # api_key は入れない（llm_profiles.SNAPSHOT_FIELDS を参照）
+    if "llm_info" not in exec_cols:
+        conn.execute("ALTER TABLE executions ADD COLUMN llm_info TEXT")
 
     # AI生成セッション
     conn.execute("""
@@ -99,6 +107,25 @@ def init_db():
             result_code TEXT,
             status      TEXT DEFAULT 'running',
             created_at  TEXT
+        )
+    """)
+
+    # LLM接続設定（複数保存して実行時に選ぶ）
+    #
+    # 以前は settings の local_* / api_* に1組だけ持っていた。モデルを
+    # 変えて比べるには上書きするしかなく、前の設定が失われていた。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS llm_profiles (
+            id                TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            provider          TEXT,
+            provider_kind     TEXT,
+            base_url          TEXT,
+            model             TEXT,
+            api_key           TEXT,
+            max_output_tokens TEXT,
+            disable_thinking  TEXT,
+            created_at        TEXT
         )
     """)
 
@@ -148,6 +175,8 @@ def init_db():
         # 全実行がコンテナ内で行われるため、作業ディレクトリ以外のホストファイルに
         # 触るツールはここでマウントを明示する必要がある。
         "sandbox_extra_mounts": "",
+        # 既定のLLMプロファイルID。初回は下の移行処理が埋める。
+        "default_llm_profile_id": "",
     }
     for k, v in defaults.items():
         conn.execute(
@@ -155,7 +184,136 @@ def init_db():
         )
 
     conn.commit()
+    _migrate_llm_profile(conn)
+    conn.commit()
     conn.close()
+
+
+def _migrate_llm_profile(conn):
+    """
+    従来の単一LLM設定を、プロファイル1件として移行する。
+
+    設定が2箇所（settings の local_*/api_* と llm_profiles）にあると、
+    どちらが効いているのか分からない状態が残る。プロファイル側へ一本化し、
+    以後の編集はプロファイル画面だけにする。従来のキーは読まれなくなるが、
+    移行元として消さずに残す（取り違えたときに戻せるように）。
+
+    プロファイルが1件でもあれば何もしない（2回目以降の起動）。
+    """
+    row = conn.execute("SELECT COUNT(*) FROM llm_profiles").fetchone()
+    if row and row[0]:
+        return
+
+    cur = conn.execute("SELECT key, value FROM settings")
+    st = {k: v for k, v in cur.fetchall()}
+    provider = (st.get("llm_provider") or "local").strip() or "local"
+    kind = (st.get("api_provider_kind") or "openai_compatible").strip()
+    if provider == "api":
+        base_url = st.get("api_base_url") or ""
+        model = st.get("api_model") or ""
+        api_key = st.get("api_key") or ""
+        tokens = st.get("api_max_output_tokens") or ""
+    else:
+        base_url = st.get("local_base_url") or ""
+        model = st.get("local_model") or ""
+        api_key = st.get("local_api_key") or ""
+        tokens = st.get("local_max_output_tokens") or ""
+
+    # 移行元が空でも1件は作る。プロファイルが0件だと実行時に選ぶものが無い
+    name = (model or "既定").strip() or "既定"
+    pid = str(uuid.uuid4())[:8]
+    conn.execute(
+        "INSERT INTO llm_profiles (id, name, provider, provider_kind, base_url, "
+        "model, api_key, max_output_tokens, disable_thinking, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (pid, name, provider, kind, base_url, model, api_key, tokens,
+         st.get("disable_thinking") or "true", datetime.now().isoformat()),
+    )
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("default_llm_profile_id", pid),
+    )
+
+
+# --- LLMプロファイル操作 ---
+
+def get_llm_profiles() -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM llm_profiles ORDER BY created_at, id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_llm_profile(profile_id: str) -> dict | None:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM llm_profiles WHERE id = ?", (profile_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def add_llm_profile(name, provider="local", provider_kind="openai_compatible",
+                    base_url="", model="", api_key="", max_output_tokens="",
+                    disable_thinking="true") -> str:
+    profile_id = str(uuid.uuid4())[:8]
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO llm_profiles (id, name, provider, provider_kind, base_url, "
+        "model, api_key, max_output_tokens, disable_thinking, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (profile_id, name, provider, provider_kind, base_url, model, api_key,
+         str(max_output_tokens), disable_thinking, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return profile_id
+
+
+def update_llm_profile(profile_id: str, **kwargs):
+    allowed = {"name", "provider", "provider_kind", "base_url", "model",
+               "api_key", "max_output_tokens", "disable_thinking"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    conn = get_connection()
+    conn.execute(f"UPDATE llm_profiles SET {sets} WHERE id = ?",
+                 (*[str(v) for v in fields.values()], profile_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_llm_profile(profile_id: str) -> bool:
+    """
+    プロファイルを削除する。最後の1件は消さない。
+
+    0件になると実行時に選ぶものが無くなり、LLM呼び出しが即座に落ちる。
+    参照しているタスク側の指定は残るが、resolve_profile_id が
+    「存在しないIDなら既定に落とす」ので実行は止まらない。
+    """
+    conn = get_connection()
+    total = conn.execute("SELECT COUNT(*) FROM llm_profiles").fetchone()[0]
+    if total <= 1:
+        conn.close()
+        return False
+    conn.execute("DELETE FROM llm_profiles WHERE id = ?", (profile_id,))
+    # 既定に選ばれていたなら、残っているものへ付け替える
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'default_llm_profile_id'").fetchone()
+    if row and row[0] == profile_id:
+        nxt = conn.execute(
+            "SELECT id FROM llm_profiles ORDER BY created_at, id LIMIT 1").fetchone()
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("default_llm_profile_id", nxt[0] if nxt else ""),
+        )
+    conn.commit()
+    conn.close()
+    return True
+
 
 # --- 設定操作 ---
 
@@ -249,15 +407,19 @@ def delete_tool(tool_id):
 
 # --- エージェントタスク操作 ---
 
-def add_agent_task(name, description, task_prompt, allowed_tool_ids=None, graph_kind=None):
+def add_agent_task(name, description, task_prompt, allowed_tool_ids=None, graph_kind=None,
+                   llm_profile_id=None):
     task_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
     conn = get_connection()
     conn.execute(
-        "INSERT INTO agent_tasks (id, name, description, task_prompt, allowed_tool_ids, graph_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_tasks (id, name, description, task_prompt, allowed_tool_ids, "
+        "graph_kind, llm_profile_id, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (task_id, name, description, task_prompt,
          json.dumps(allowed_tool_ids) if allowed_tool_ids else None,
          graph_kind or None,
+         llm_profile_id or None,
          now, now)
     )
     conn.commit()
@@ -280,7 +442,7 @@ def update_agent_task(task_id, **kwargs):
     conn = get_connection()
     sets = ["updated_at = ?"]
     vals = [datetime.now().isoformat()]
-    for key in ("name", "description", "task_prompt", "graph_kind"):
+    for key in ("name", "description", "task_prompt", "graph_kind", "llm_profile_id"):
         if key in kwargs:
             sets.append(f"{key} = ?")
             vals.append(kwargs[key])
@@ -349,6 +511,21 @@ def add_execution(exec_type, target_id, target_name, trigger="manual", schedule_
     conn.commit()
     conn.close()
     return exec_id
+
+def set_execution_llm_info(exec_id: str, info: dict):
+    """
+    その実行で使ったモデルを記録する（履歴の「まとめてコピー」に出す）。
+
+    info には api_key を入れない。履歴はそのまま外へ貼られる前提のテキストに
+    なるため、鍵が1度混ざると貼った先すべてから消す必要が出る。
+    写しの作成は llm_profiles.snapshot が担う。
+    """
+    conn = get_connection()
+    conn.execute("UPDATE executions SET llm_info = ? WHERE id = ?",
+                 (json.dumps(info, ensure_ascii=False) if info else None, exec_id))
+    conn.commit()
+    conn.close()
+
 
 def set_execution_graph_kind(exec_id: str, graph_kind: str):
     """

@@ -5,6 +5,7 @@
 import streamlit as st
 
 import graphs
+import llm_profiles
 from db import add_tool, add_agent_task, get_verified_tools
 from ai_creator import generate_tool
 from ui.common import preview_options, preview_and_fix
@@ -193,9 +194,30 @@ def render():
         if at_kind != "default":
             st.caption(graphs.GRAPH_DESCRIPTIONS[at_kind])
 
+        # 使用するモデル。グラフと同じで、未指定なら設定画面の既定に従う
+        at_profiles = llm_profiles.profiles()
+        at_by_id = {p["id"]: p for p in at_profiles}
+        at_default = at_by_id.get(llm_profiles.default_profile_id())
+        at_profile_options = [llm_profiles.DEFAULT] + [p["id"] for p in at_profiles]
+        at_profile = st.selectbox(
+            "使用するモデル",
+            options=at_profile_options,
+            format_func=lambda pid: (
+                "設定の既定に従う"
+                + (f"（{llm_profiles.profile_label(at_default)}）" if at_default else "")
+                if pid == llm_profiles.DEFAULT
+                else llm_profiles.profile_label(at_by_id[pid])
+            ),
+            help="タスクごとにモデルを固定できます。未指定なら設定画面の既定に従います。",
+        )
+        if at_profile != llm_profiles.DEFAULT:
+            st.caption(llm_profiles.profile_summary(at_by_id[at_profile]))
+
         if st.button("🧠 エージェントタスクを登録", type="primary",
                      disabled=not (at_name and at_prompt)):
             tid = add_agent_task(at_name, at_desc, at_prompt,
                                 allowed_tool_ids=selected_tool_ids if selected_tool_ids else None,
-                                graph_kind=None if at_kind == "default" else at_kind)
+                                graph_kind=None if at_kind == "default" else at_kind,
+                                llm_profile_id=(None if at_profile == llm_profiles.DEFAULT
+                                                else at_profile))
             st.success(f"登録完了: {tid}（エージェントタブで実行できます）")

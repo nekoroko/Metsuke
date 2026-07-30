@@ -13,6 +13,10 @@
     python3 verify_run.py --graph react        # ReActループ
     python3 verify_run.py --task "…"           # タスクを差し替え
     python3 verify_run.py --both               # 両方を続けて実行
+    python3 verify_run.py --list-profiles      # 保存済みモデルの一覧
+    python3 verify_run.py --profile "Qwen"     # モデルを選んで実行（名前かID）
+
+モデルを変えて比べるときは --profile を使う。所要時間は判定行の見出しに出る。
 
 出力の最後に「観点ごとの判定」が出る。判定できなかった項目は
 「判定不能」と出すので、そのまま貼って渡せば切り分けできる。
@@ -133,22 +137,40 @@ def check_results(kind, final_state, result_text, elapsed):
     return "\n".join(lines)
 
 
-def run_one(kind, task, timeout_note=True):
+def pick_profile(wanted: str):
+    """名前かIDでプロファイルを1件選ぶ。未指定なら既定。見つからなければ None。"""
+    import llm_profiles
+    if not wanted:
+        return llm_profiles.resolve_profile()
+    for p in llm_profiles.profiles():
+        if wanted in (p["id"], p.get("name")):
+            return p
+    return None
+
+
+def run_one(kind, task, profile=None):
+    import config
     import graphs
+    import llm_profiles
     from trace_view import format_trace_lines
     from executor import _finalize_result
 
     print(f"\n########## {kind} ##########")
+    if profile:
+        print(f"  モデル: {llm_profiles.profile_label(profile)}"
+              f" / {llm_profiles.profile_summary(profile)}")
     app = graphs.get_app(kind)
     state = graphs.make_state(kind, task)
     started = time.time()
     final = None
     try:
-        for step in app.stream(state):
-            for node, s in step.items():
-                final = s
-                print(f"  … {node} (step={s.get('step_count')}, status={s.get('status')})",
-                      flush=True)
+        # 各ノードの get_llm() がこのプロファイルを使う（executor と同じ形）
+        with config.use_profile(profile):
+            for step in app.stream(state):
+                for node, s in step.items():
+                    final = s
+                    print(f"  … {node} (step={s.get('step_count')}, status={s.get('status')})",
+                          flush=True)
     except Exception as e:
         print(f"\n!! 実行が例外で止まりました: {type(e).__name__}: {e}")
         if final is None:
@@ -170,16 +192,37 @@ def main():
     ap.add_argument("--task", default=DEFAULT_TASK)
     ap.add_argument("--both", action="store_true")
     ap.add_argument("--dump", default="", help="最終状態をJSONで書き出すパス")
+    ap.add_argument("--profile", default="",
+                    help="使用するLLMプロファイル（名前かID）。未指定なら既定")
+    ap.add_argument("--list-profiles", action="store_true",
+                    help="保存済みプロファイルを一覧して終了")
     args = ap.parse_args()
 
+    import llm_profiles
+
+    if args.list_profiles:
+        default_id = llm_profiles.default_profile_id()
+        for p in llm_profiles.profiles():
+            mark = " ⭐️既定" if p["id"] == default_id else ""
+            print(f"{p['id']}  {llm_profiles.profile_label(p)}{mark}")
+            print(f"          {llm_profiles.profile_summary(p)}")
+        return 0
+
+    profile = pick_profile(args.profile)
+    if args.profile and not profile:
+        print(f"プロファイルが見つかりません: {args.profile}")
+        print("--list-profiles で一覧できます。")
+        return 1
+
     import config
-    info = config.get_current_provider_info()
+    with config.use_profile(profile):
+        info = config.get_current_provider_info()
     print(f"LLM: {info}")
 
     kinds = ["research", "react"] if args.both else [args.graph]
     finals = {}
     for kind in kinds:
-        finals[kind] = run_one(kind, args.task)
+        finals[kind] = run_one(kind, args.task, profile)
 
     if args.dump:
         with open(args.dump, "w", encoding="utf-8") as f:

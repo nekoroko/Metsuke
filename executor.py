@@ -4,36 +4,56 @@ from datetime import datetime
 
 from db import (
     add_execution, finish_execution, update_execution_progress,
-    set_execution_graph_kind,
+    set_execution_graph_kind, set_execution_llm_info,
 )
 from sandbox import (
     execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
 )
 from state import make_initial_state  # noqa: F401  （外部から参照されている）
+import config
 import graphs
+import llm_profiles
 
 WORKSPACE = "/tmp/agent_workspace"
 
 
 def _prepare_agent_run(exec_id: str, task_id: str, task_prompt: str,
-                       graph_kind: str = None):
+                       graph_kind: str = None, llm_profile_id: str = None):
     """
-    使用するグラフを決めて、そのグラフ用の初期状態を作る。
+    使用するグラフとモデルを決めて、そのグラフ用の初期状態を作る。
 
-    切り替えの優先順位は 引数 > タスク個別設定 > 設定画面の既定。
+    切り替えの優先順位は、グラフもモデルも 引数 > タスク個別設定 > 設定画面の既定。
     グラフごとにステップ予算が違う（ステートマシンは1ラウンドで
     複数ノード進むため）ので、初期状態の生成もここへ寄せている。
 
-    決まった種別はここでDBへ記録する。実行を開始する側は、どのグラフに
+    決まった種別とモデルはここでDBへ記録する。実行を開始する側は、どちらに
     なるかを知らないまま exec_id を作っている。記録を呼び出し側に任せると
     3つの実行経路のどれかで書き漏らす。
     """
     kind = graphs.resolve_kind(task_id, graph_kind)
+    profile = llm_profiles.resolve_profile(task_id, llm_profile_id)
     try:
         set_execution_graph_kind(exec_id, kind)
+        set_execution_llm_info(exec_id, llm_profiles.snapshot(profile))
     except Exception:
         pass          # 記録は表示用。失敗しても実行は続ける
-    return kind, graphs.get_app(kind), graphs.make_state(kind, task_prompt)
+    return (kind, graphs.get_app(kind), graphs.make_state(kind, task_prompt),
+            profile)
+
+
+def _agent_steps(agent_app, initial_state, profile):
+    """
+    プロファイルを効かせた状態でグラフを回し、(ノード名, 状態) を順に返す。
+
+    get_llm() はグラフの各ノードから直接呼ばれるので、実行の外側で
+    「今どのモデルか」を立てておく必要がある。3つの実行経路それぞれで
+    with を書くと、どれか1つで書き漏らしたときに黙って既定のモデルで
+    走ってしまう。回すところを1箇所に寄せる。
+    """
+    with config.use_profile(profile):
+        for step in agent_app.stream(initial_state):
+            for node_name, state in step.items():
+                yield node_name, state
 
 
 def _extract_done_text(history: list) -> str:
@@ -130,7 +150,7 @@ def run_tool(tool_id: str, tool_name: str, code: str,
 
 def run_agent(task_id: str, task_name: str, task_prompt: str,
               trigger: str = "manual", schedule_id: str = None,
-              graph_kind: str = None) -> dict:
+              graph_kind: str = None, llm_profile_id: str = None) -> dict:
     """
     Type 2: エージェントにタスクを投げる（LLM必要）
     ReAct（graph.py）かリサーチ用ステートマシン（graph_research.py）を
@@ -140,13 +160,12 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
     exec_id = add_execution("agent", task_id, task_name, trigger, schedule_id)
 
     try:
-        _kind, agent_app, initial_state = _prepare_agent_run(
-            exec_id, task_id, task_prompt, graph_kind)
+        _kind, agent_app, initial_state, profile = _prepare_agent_run(
+            exec_id, task_id, task_prompt, graph_kind, llm_profile_id)
 
         final_state = None
-        for step in agent_app.stream(initial_state):
-            for node_name, state in step.items():
-                final_state = state
+        for _node_name, state in _agent_steps(agent_app, initial_state, profile):
+            final_state = state
 
         if final_state is None:
             finish_execution(exec_id, "error", stderr="実行結果が空です")
@@ -216,7 +235,7 @@ def _build_tool_context(task_id: str) -> str:
 
 
 def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None,
-                         graph_kind: str = None):
+                         graph_kind: str = None, llm_profile_id: str = None):
     """
     Type 2のバックグラウンド実行版。
     APSchedulerから呼ばれ、各ステップごとにDBの進捗を更新する。
@@ -229,15 +248,14 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None,
             if tool_context:
                 task_prompt = task_prompt + "\n" + tool_context
 
-        _kind, agent_app, initial_state = _prepare_agent_run(
-            exec_id, task_id, task_prompt, graph_kind)
+        _kind, agent_app, initial_state, profile = _prepare_agent_run(
+            exec_id, task_id, task_prompt, graph_kind, llm_profile_id)
 
         final_state = None
-        for step in agent_app.stream(initial_state):
-            for node_name, state in step.items():
-                final_state = state
-                # 各ステップごとにDBに進捗を保存
-                update_execution_progress(exec_id, state["history"], state.get("trace"))
+        for _node_name, state in _agent_steps(agent_app, initial_state, profile):
+            final_state = state
+            # 各ステップごとにDBに進捗を保存
+            update_execution_progress(exec_id, state["history"], state.get("trace"))
 
         if final_state is None:
             finish_execution(exec_id, "error", stderr="実行結果が空です")
@@ -302,7 +320,7 @@ def parse_history_for_display(history: list) -> list:
 
 
 def run_agent_streaming(task_id: str, task_name: str, task_prompt: str,
-                        graph_kind: str = None):
+                        graph_kind: str = None, llm_profile_id: str = None):
     """
     Type 2のストリーミング版。UIでリアルタイム表示に使う。
     """
@@ -310,44 +328,43 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str,
     exec_id = add_execution("agent", task_id, task_name, trigger="manual")
 
     try:
-        _kind, agent_app, initial_state = _prepare_agent_run(
-            exec_id, task_id, task_prompt, graph_kind)
+        _kind, agent_app, initial_state, profile = _prepare_agent_run(
+            exec_id, task_id, task_prompt, graph_kind, llm_profile_id)
 
         import re as _re
 
         final_state = None
-        for step in agent_app.stream(initial_state):
-            for node_name, state in step.items():
-                final_state = state
-                step_info = {"step": state["step_count"], "status": state["status"]}
+        for _node_name, state in _agent_steps(agent_app, initial_state, profile):
+            final_state = state
+            step_info = {"step": state["step_count"], "status": state["status"]}
 
-                if state["history"]:
-                    latest = state["history"][-1]
-                    step_info["role"] = latest["role"]
-                    if latest["role"] == "assistant":
-                        content = latest["content"]
-                        # THOUGHT: (次のキーワードまで or 末尾)
-                        thought_m = _re.search(
-                            r"THOUGHT:\s*(.+?)(?=\n(?:ACTION:|DONE:)|\Z)",
-                            content, _re.DOTALL
-                        )
-                        if thought_m:
-                            step_info["thought"] = thought_m.group(1).strip()
-                        # ACTION: (次のキーワードまで or 末尾)
-                        action_m = _re.search(
-                            r"ACTION:\s*(.+?)(?=\n(?:THOUGHT:|DONE:)|\Z)",
-                            content, _re.DOTALL
-                        )
-                        if action_m:
-                            step_info["action"] = action_m.group(1).strip()
-                        # DONE: (末尾まで全部)
-                        done_m = _re.search(r"DONE:\s*(.+)", content, _re.DOTALL)
-                        if done_m:
-                            step_info["done"] = done_m.group(1).strip()
-                    elif latest["role"] == "result":
-                        step_info["result"] = latest["content"][:500]
+            if state["history"]:
+                latest = state["history"][-1]
+                step_info["role"] = latest["role"]
+                if latest["role"] == "assistant":
+                    content = latest["content"]
+                    # THOUGHT: (次のキーワードまで or 末尾)
+                    thought_m = _re.search(
+                        r"THOUGHT:\s*(.+?)(?=\n(?:ACTION:|DONE:)|\Z)",
+                        content, _re.DOTALL
+                    )
+                    if thought_m:
+                        step_info["thought"] = thought_m.group(1).strip()
+                    # ACTION: (次のキーワードまで or 末尾)
+                    action_m = _re.search(
+                        r"ACTION:\s*(.+?)(?=\n(?:THOUGHT:|DONE:)|\Z)",
+                        content, _re.DOTALL
+                    )
+                    if action_m:
+                        step_info["action"] = action_m.group(1).strip()
+                    # DONE: (末尾まで全部)
+                    done_m = _re.search(r"DONE:\s*(.+)", content, _re.DOTALL)
+                    if done_m:
+                        step_info["done"] = done_m.group(1).strip()
+                elif latest["role"] == "result":
+                    step_info["result"] = latest["content"][:500]
 
-                yield step_info
+            yield step_info
 
         # 最終的にfinal_stateからDONEを抽出してyieldする
         if final_state and final_state["status"] == "done":

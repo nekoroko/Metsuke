@@ -26,3 +26,33 @@ def read_settings() -> dict:
         return {r["key"]: r["value"] for r in rows}
     except Exception:
         return {}
+
+
+def read_llm_profiles() -> list[dict]:
+    """LLMプロファイルを作成順に読む。失敗時は空リスト。
+
+    書き込みは db.py 側。ここは config.py / llm_profiles.py から
+    init_db() の副作用なしに読むための経路。
+    """
+    try:
+        if not os.path.exists(DB_PATH):
+            return []
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM llm_profiles ORDER BY created_at, id"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def read_llm_profile(profile_id: str) -> dict | None:
+    """IDで1件読む。見つからなければ None。"""
+    if not profile_id:
+        return None
+    for p in read_llm_profiles():
+        if p["id"] == profile_id:
+            return p
+    return None
