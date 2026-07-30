@@ -14,7 +14,7 @@ import {
 } from '../api/hooks'
 import { Empty, Kicker, Tag } from '../components/ui'
 
-export function TaskDetailPage() {
+export function TaskDetailPage({ isNew = false }: { isNew?: boolean } = {}) {
   const { taskId } = useParams<{ taskId: string }>()
   const navigate = useNavigate()
   const tasks = useAgentTasks()
@@ -24,7 +24,7 @@ export function TaskDetailPage() {
   const invalidate = useInvalidate()
   const runAgent = useRunAgent()
 
-  const task = (tasks.data ?? []).find((t) => t.id === taskId)
+  const task = isNew ? undefined : (tasks.data ?? []).find((t) => t.id === taskId)
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -44,23 +44,34 @@ export function TaskDetailPage() {
     setToolIds(task.allowed_tool_ids ?? [])
   }, [task?.id])                                      // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (tasks.isLoading) return <div className="page-body">読み込み中…</div>
-  if (!task) return <Empty message="このタスクは見つかりませんでした。" />
+  if (!isNew && tasks.isLoading) return <div className="page-body">読み込み中…</div>
+  if (!isNew && !task) return <Empty message="このタスクは見つかりませんでした。" />
+
+  const fields = {
+    name, description, task_prompt: prompt,
+    allowed_tool_ids: toolIds,
+    graph_kind: graphKind === 'default' ? null : graphKind,
+    llm_profile_id: profileId === 'default' ? null : profileId,
+  }
+  const canSave = name.trim().length > 0 && prompt.trim().length > 0
 
   async function save() {
-    await api.agentTasks.update(task!.id, {
-      name, description, task_prompt: prompt,
-      allowed_tool_ids: toolIds,
-      graph_kind: graphKind === 'default' ? null : graphKind,
-      llm_profile_id: profileId === 'default' ? null : profileId,
-    })
+    if (isNew) {
+      const created = await api.agentTasks.create(fields)
+      invalidate(keys.agentTasks)
+      // 作った直後は編集画面へ。続けて実行できるようにする
+      navigate(`/tasks/${created.id}`)
+      return
+    }
+    await api.agentTasks.update(task!.id, fields)
     invalidate(keys.agentTasks)
     setSaved(true)
     window.setTimeout(() => setSaved(false), 2000)
   }
 
   async function remove() {
-    await api.agentTasks.remove(task!.id)
+    if (!task) return
+    await api.agentTasks.remove(task.id)
     invalidate(keys.agentTasks)
     navigate('/tasks')
   }
@@ -75,20 +86,28 @@ export function TaskDetailPage() {
       <header className="page-header">
         <div>
           <div className="kicker">Agent Task</div>
-          <h2 className="page-title">{task.name}</h2>
+          <h2 className="page-title">{isNew ? '新しいタスク' : task!.name}</h2>
         </div>
         <div className="page-header-actions">
           {saved && <Tag kind="neutral">保存しました</Tag>}
-          <button className="btn btn-secondary" onClick={() => void save()}>💾 保存</button>
           <button
-            className="btn btn-primary"
-            onClick={async () => {
-              const res = await runAgent.mutateAsync({ id: task.id })
-              navigate(`/runs/${res.exec_id}`)
-            }}
+            className={isNew ? 'btn btn-primary' : 'btn btn-secondary'}
+            onClick={() => void save()}
+            disabled={!canSave}
           >
-            <Play size={13} style={{ marginRight: 6 }} />実行
+            {isNew ? '＋ 作成' : '💾 保存'}
           </button>
+          {!isNew && (
+            <button
+              className="btn btn-primary"
+              onClick={async () => {
+                const res = await runAgent.mutateAsync({ id: task!.id })
+                navigate(`/runs/${res.exec_id}`)
+              }}
+            >
+              <Play size={13} style={{ marginRight: 6 }} />実行
+            </button>
+          )}
         </div>
       </header>
 
@@ -107,7 +126,17 @@ export function TaskDetailPage() {
             <textarea
               id="t-prompt" className="input" rows={8}
               value={prompt} onChange={(e) => setPrompt(e.target.value)}
+              placeholder={isNew
+                ? '例: SKハイニックスの直近の決算（実績値）と直近1週間の株価動向を調べて、'
+                  + '数値には出典と時点を付けて日本語でまとめてください。'
+                : undefined}
             />
+            {isNew && (
+              <div className="hint">
+                エージェントに渡す指示です。数値を扱う調査では「出典と時点を付ける」
+                まで書いておくと、検証が効きやすくなります。
+              </div>
+            )}
           </div>
 
           <div className="field">
@@ -161,12 +190,17 @@ export function TaskDetailPage() {
             )}
           </div>
 
-          <div>
-            <Kicker>Danger</Kicker>
-            <button className="btn btn-secondary btn-sm" style={{ marginTop: 6 }} onClick={() => void remove()}>
-              <Trash2 size={12} style={{ marginRight: 5 }} />このタスクを削除
-            </button>
-          </div>
+          {!isNew && (
+            <div>
+              <Kicker>Danger</Kicker>
+              <button className="btn btn-secondary btn-sm" style={{ marginTop: 6 }} onClick={() => void remove()}>
+                <Trash2 size={12} style={{ marginRight: 5 }} />このタスクを削除
+              </button>
+            </div>
+          )}
+          {isNew && !canSave && (
+            <div className="hint">タスク名とタスクプロンプトを入力すると作成できます。</div>
+          )}
         </div>
       </div>
     </>

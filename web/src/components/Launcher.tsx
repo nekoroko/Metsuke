@@ -207,8 +207,19 @@ export function Launcher({ open, onClose }: Props) {
             <Kicker>実行する / RUN</Kicker>
           </div>
           {items.length === 0 && (
-            <div style={{ padding: '10px 16px', opacity: 0.6, fontSize: 13 }}>
-              一致するものがありません。
+            <div style={{ padding: '10px 16px' }}>
+              <div style={{ opacity: 0.6, fontSize: 13, marginBottom: 8 }}>
+                一致するものがありません。
+              </div>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  onClose()
+                  navigate('/tasks/new')
+                }}
+              >
+                ＋ 新しいタスクを作る
+              </button>
             </div>
           )}
           {items.map((item, i) => {

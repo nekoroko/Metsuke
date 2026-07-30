@@ -6,7 +6,7 @@
 
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { LayoutGrid, List as ListIcon, Play, Search } from 'lucide-react'
+import { LayoutGrid, List as ListIcon, Play, Plus, Search } from 'lucide-react'
 
 import {
   unify, useAgentTasks, useExecutions, useLlmProfiles, useMeta, useRunAgent,
@@ -91,6 +91,10 @@ export function TasksPage({ onOpenLauncher }: { onOpenLauncher: () => void }) {
               <LayoutGrid size={13} />
             </button>
           </div>
+          <button className="btn btn-secondary" onClick={() => navigate('/tasks/new')}>
+            <Plus size={13} style={{ marginRight: 6 }} />
+            新規タスク
+          </button>
           <button className="btn btn-primary" onClick={onOpenLauncher}>
             <Play size={13} style={{ marginRight: 6 }} />
             実行 / Run
@@ -125,11 +129,19 @@ export function TasksPage({ onOpenLauncher }: { onOpenLauncher: () => void }) {
 
       {rows.length === 0 ? (
         <Empty
-          message="まだツールがありません。"
+          message={query || filter !== 'all'
+            ? '条件に合うものがありません。'
+            : 'まだタスクがありません。エージェントタスクは調査や要約を任せるもの、'
+              + 'ツールは決まった処理を書いたコードです。'}
           action={
-            <button className="btn btn-primary" onClick={() => navigate('/library')}>
-              ＋ 新規タスク
-            </button>
+            <div className="row">
+              <button className="btn btn-primary" onClick={() => navigate('/tasks/new')}>
+                ＋ エージェントタスクを作る
+              </button>
+              <button className="btn btn-secondary" onClick={() => navigate('/library')}>
+                🔧 ツールを作る
+              </button>
+            </div>
           }
         />
       ) : dense ? (

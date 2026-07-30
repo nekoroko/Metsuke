@@ -34,6 +34,8 @@ export function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/tasks" replace />} />
           <Route path="/tasks" element={<TasksPage onOpenLauncher={() => setLauncherOpen(true)} />} />
+          {/* :taskId より前に置く。後ろだと "new" がIDとして解釈される */}
+          <Route path="/tasks/new" element={<TaskDetailPage isNew />} />
           <Route path="/tasks/:taskId" element={<TaskDetailPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:execId" element={<RunDetailPage />} />
