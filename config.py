@@ -22,12 +22,66 @@
 # コード内の定数は、設定値が空/不正な場合の最終フォールバックに過ぎない。
 
 import os
-import sqlite3
+import re
 import time
 import random
+import threading
+from contextlib import contextmanager
 from langchain_openai import ChatOpenAI
+from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
+from settings_store import read_settings as _read_settings
+import llm_profiles
 
-AGENT_STUDIO_DB = os.path.expanduser("~/agent-studio/agent_studio.db")
+
+# 実行中のLLMプロファイル。
+#
+# get_llm() はグラフの各ノードから直接呼ばれる（graph.py / graph_research.py で
+# 十数箇所）。引数で引き回すと全ノードのシグネチャを変えることになるので、
+# 実行の開始時に「今どのプロファイルで動いているか」を立てて、get_llm 側が
+# それを見る形にする。
+#
+# thread-local にするのは、スケジューラのジョブと Streamlit の画面が
+# 別スレッドで同時に走るため。モジュール変数にすると、片方の実行が
+# もう片方のモデルを差し替えてしまう。
+_active = threading.local()
+
+
+def active_profile() -> dict | None:
+    return getattr(_active, "profile", None)
+
+
+@contextmanager
+def use_profile(profile: dict):
+    """このブロックの中の get_llm() が profile を使うようにする。
+
+    入れ子になった場合は内側を優先し、抜けたら元に戻す。
+    """
+    previous = getattr(_active, "profile", None)
+    _active.profile = profile or None
+    try:
+        yield
+    finally:
+        _active.profile = previous
+
+
+def _effective_settings() -> dict:
+    """設定に、使うプロファイルの値を重ねたもの。
+
+    プロファイルは settings と同じキー名に展開されるので、get_llm() の
+    分岐（provider / provider_kind ごとの読み分け）はそのまま使える。
+
+    実行中のプロファイルが無い場合も、既定のプロファイルを重ねる。
+    設定はプロファイル側へ一本化してあり、従来の local_* / api_* キーは
+    移行元として残しているだけで編集経路が無い。ここでフォールバックすると
+    「画面で編集した値と、ツール生成AIが使う値が食い違う」状態になる。
+
+    プロファイルが1件も無い（DBが読めない等）場合だけ、従来のキーが効く。
+    """
+    settings = _read_settings()
+    profile = active_profile() or llm_profiles.resolve_profile()
+    if profile:
+        settings = {**settings, **llm_profiles.profile_settings(profile)}
+    return settings
 
 FALLBACK_LOCAL_BASE_URL = "http://10.0.2.2:1234/v1"
 FALLBACK_LOCAL_MODEL = "gemma-4-12b-qat"
@@ -37,18 +91,6 @@ ABSOLUTE_FALLBACK_LOCAL_MAX_TOKENS = 3000
 ABSOLUTE_FALLBACK_API_MAX_TOKENS = 4000
 
 
-def _read_settings() -> dict:
-    """agent-studioのDBから設定を読み込む。失敗時は空dict。"""
-    try:
-        if not os.path.exists(AGENT_STUDIO_DB):
-            return {}
-        conn = sqlite3.connect(AGENT_STUDIO_DB)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT key, value FROM settings").fetchall()
-        conn.close()
-        return {r["key"]: r["value"] for r in rows}
-    except Exception:
-        return {}
 
 
 def _resolve_max_tokens(configured: str, absolute_fallback: int,
@@ -219,7 +261,7 @@ def get_llm(temperature: float = 0.1, boost_tokens: bool = False):
     設定値が入っていればそれを尊重し、空/不正な場合のみコード内の
     保守的なフォールバック値を使う。
     """
-    settings = _read_settings()
+    settings = _effective_settings()
     provider = settings.get("llm_provider", "local")
     api_provider_kind = settings.get("api_provider_kind", "openai_compatible")
     disable_thinking = settings.get("disable_thinking", "true") == "true"
@@ -293,7 +335,7 @@ def get_llm(temperature: float = 0.1, boost_tokens: bool = False):
 
 def get_current_provider_info() -> dict:
     """現在の設定情報を返す（UI表示・デバッグ用）"""
-    settings = _read_settings()
+    settings = _effective_settings()
     provider = settings.get("llm_provider", "local")
     api_provider_kind = settings.get("api_provider_kind", "openai_compatible")
     disable_thinking = settings.get("disable_thinking", "true") == "true"
@@ -328,6 +370,11 @@ def get_current_provider_info() -> dict:
             "model": settings.get("local_model") or FALLBACK_LOCAL_MODEL,
         }
     info["thinking_disabled"] = disable_thinking
+    # どのプロファイルで動いているか。実行中でなければ既定のものを見る
+    profile = active_profile() or llm_profiles.resolve_profile()
+    info["profile_name"] = (profile or {}).get("name", "")
+    info["profile_id"] = (profile or {}).get("id", "")
+
     return info
 
 
@@ -386,6 +433,30 @@ def invoke_with_retry(llm, messages, max_retries: int = 3):
             time.sleep(wait_time)
 
     raise last_error
+
+
+def salvage_from_reasoning(response) -> str:
+    """
+    本文（content）が空で、回答が思考側（reasoning_content）に入りきってしまった
+    場合に、そこから本文を回収する。
+
+    実測（gemma-4-e4b / LM Studio）で、コンテキスト8192に対しプロンプトが7160、
+    出力枠1032のうち1029がreasoningに消費され、content が空のまま
+    finish_reason='length' になるケースが発生した。このとき reasoning_content には
+    「ACTION: DONE / DONE: <完成したレポート>」がそのまま入っており、
+    回答自体は生成できているのに捨てていた。
+
+    Thinkingを無効化する設定を送っても、モデル・サーバーの実装によっては効かない。
+    そのため、抑制に失敗した場合の回収経路を用意しておく。
+    """
+    text = extract_reasoning_content_text(response)
+    if not text or not text.strip():
+        return ""
+    # 行頭の DONE: / ACTION: を見つけたら、そこから後ろを本文として扱う
+    m = re.search(r"^[ \t　]*(?:DONE:|ACTION:)", text, re.MULTILINE)
+    if m:
+        return text[m.start():]
+    return ""
 
 
 def invoke_with_continuation(llm, messages, max_continuations: int = 3):
@@ -472,6 +543,15 @@ def invoke_with_continuation(llm, messages, max_continuations: int = 3):
         full_content += piece
 
         finish_reason = extract_finish_reason(response)
+
+        # 本文が空のまま打ち切られた場合、思考側に回答が入っていないか確認する。
+        # 入っていれば継続リクエストを重ねずにそこで確定させる
+        # （継続しても同じことを繰り返し、枠を食い潰すだけになるため）。
+        if not full_content.strip():
+            salvaged = salvage_from_reasoning(response)
+            if salvaged:
+                full_content = salvaged
+                break
 
         if finish_reason != "length":
             break

@@ -15,3 +15,70 @@ class AgentState(TypedDict):
     last_tool_name: str       # 直前に呼んだツール名（action_type=="tool"の場合のみ）
     tool_verify_count: int    # verify_toolノードを通った回数（step_countとは別管理）
     max_tool_verifies: int    # verify_toolノードの最大実行回数
+    findings: list[dict]      # 検索結果から機械抽出した数値・日付。履歴トリミングの対象外
+    sources: list[dict]       # 取得したページの抜粋 {"url","excerpt","source_truncated"}
+    verification_notes: list[str]  # 差し戻せなかった検証結果。最終回答に注記として出す
+    trace: list[dict]         # ノードの実行履歴（どこから来て何をして次はどこか）
+    correction_count: int     # 訂正を差し戻した回数（素通りは数えない）
+    max_corrections: int      # 訂正の差し戻し上限
+    # --- ここから下はリサーチ用ステートマシン（graph_research.py）でのみ使う ---
+    plan_items: list[dict]    # 調査項目 {"id","question","query","status","hits"}
+    research_round: int       # 検索ラウンド数
+    max_rounds: int           # 検索ラウンドの上限
+    queries_done: list[str]   # 実行済みクエリ（同じクエリの空回りを防ぐ）
+    compose_count: int        # レポートを書いた回数（差し戻しを含む）
+    max_composes: int         # レポート執筆の上限
+    compose_retry_count: int  # 空応答による書き直しの回数（差し戻しとは別枠）
+    max_compose_retries: int  # 空応答の再試行上限
+    reserve_compose_for_critic: int  # criticの差し戻し用に空けておくcompose枠
+    confirmed: list[dict]     # 出典と一致して検証済みになった数値（書き換え禁止）
+    fetched_urls: list[str]   # 本文取得を試みたURL（再試行の抑制に使う）
+
+
+def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
+                       max_tool_verifies: int = 6, max_corrections: int = 2,
+                       max_rounds: int = 3, max_composes: int = 3,
+                       max_compose_retries: int = 1,
+                       reserve_compose_for_critic: int = 0) -> AgentState:
+    """
+    エージェントの初期状態を生成する。
+
+    AgentStateにキーを追加した際、初期化箇所（run.py / executor.pyの3箇所）の
+    どれかが取り残されると、そのキーを直接添字アクセスするノードに到達した
+    時点でKeyErrorになる。実際、run.py が critique_count 等を持たないまま
+    残っており、DONE後に critic_step の state["critique_count"] で落ちていた。
+
+    初期状態の生成をここへ集約し、追加漏れが構造的に起きないようにする。
+    """
+    return {
+        "task": task,
+        "history": [],
+        "generated_code": "",
+        "status": "running",
+        "step_count": 0,
+        "max_steps": max_steps,
+        "critique_count": 0,
+        "max_critiques": max_critiques,
+        "reasoning_detected": False,
+        "last_action_type": "",
+        "last_tool_name": "",
+        "tool_verify_count": 0,
+        "max_tool_verifies": max_tool_verifies,
+        "findings": [],
+        "sources": [],
+        "verification_notes": [],
+        "trace": [],
+        "correction_count": 0,
+        "max_corrections": max_corrections,
+        "plan_items": [],
+        "research_round": 0,
+        "max_rounds": max_rounds,
+        "queries_done": [],
+        "compose_count": 0,
+        "max_composes": max_composes,
+        "compose_retry_count": 0,
+        "max_compose_retries": max_compose_retries,
+        "reserve_compose_for_critic": reserve_compose_for_critic,
+        "confirmed": [],
+        "fetched_urls": [],
+    }

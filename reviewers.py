@@ -3,6 +3,14 @@
 import re
 from config import get_llm, extract_text_content, invoke_with_retry
 from datetime import datetime
+from numeric import (
+    extract_numbers, find_conversion_pairs, conversion_plausible, matches_any,
+    format_findings, forecast_marked_as_actual, untagged_ratio,
+    dropped_supported_numbers, sign_conflicts, FORECAST_WORDS,
+    label_value_mismatches, candidates_for, tag_conflicts,
+    appears_verbatim, labeled_values, primary_label, TRUNCATION_MARK,
+    candidate_suggestion, ohlc_values, matches_bare, source_texts, mask_urls,
+)
 
 
 # ===== プロンプト定義 =====
@@ -48,6 +56,50 @@ FACT_CHECKER_PROMPT = (
     "   - 「下落」の情報と「急騰」の情報が両方ある → 新しい方を優先する\n"
     "   実行履歴の検索結果に含まれる日付を比較し、最終回答が最も新しい情報を反映していない場合は、\n"
     "   NEEDS_REVISIONとして「どちらの情報が新しいか」を明示した上で修正を指示してください。\n"
+    "7. **結論の向きを変える数値の欠落（重要）**: 実行履歴や下の数値一覧に、下落率・減益・\n"
+    "   赤字・遅延など、最終回答の結論と逆向きの数値や事実が含まれていないか確認してください。\n"
+    "   含まれているのに最終回答が触れていない場合は、必ず NEEDS_REVISION とし、\n"
+    "   どの数値を反映すべきかを明示してください。\n"
+    "8. **予定日の注記**: 「◯日に発表」等の予定が履歴にあり、その日が現在の日付以前\n"
+    "   または数日以内であるのに、予想値が確定値のように書かれていないか確認してください。\n"
+    "9. **予想と実績の取り違え（最重要）**: 「コンセンサス」「見通し」「見込み」と\n"
+    "   書かれた出典の数値が、最終回答で実績値のように扱われていないか確認してください。\n"
+    "   各数値に [実績] / [予想] の区別が付いているかも見てください。付いていなければ\n"
+    "   NEEDS_REVISION としてください。\n"
+    "10. **市場・通貨の混同**: 同じ企業が複数市場に上場している場合\n"
+    "   （例: 韓国取引所のウォン建てと米国ADRのドル建て）、異なる市場・通貨の数値が\n"
+    "   断りなく同じ項目に並べられていないか確認してください。出典の記載が、その数値を\n"
+    "   実際に取得したページと食い違っていないかも確認してください。\n"
+    "11. **株価の時点**: 株価・騰落率に「いつ時点か」「どの市場か」が併記されているか\n"
+    "   確認してください。「ある時点において」のような曖昧な記述は不十分です。\n"
+    "12. **根拠のない記述（最重要）**: 最終回答の各段落について、その内容が\n"
+    "   実行履歴の検索結果に由来するか確認してください。履歴に無い一般論・推測・\n"
+    "   業界知識で埋められた段落があれば、**加筆ではなく削除**を指示してください。\n"
+    "\n"
+    "## 指示を書くときの制約（必ず守ること）\n"
+    "- 指示は「実行履歴のどの情報を追加・訂正・削除すべきか」に限ること。\n"
+    "- **結論の方向（好調/不調、上昇/下落、懸念/反転）を指示してはいけない。**\n"
+    "  レビュアーが結論を先に決めると、エージェントはその結論に合わせて\n"
+    "  根拠のない記述を作り出す。実測で、「懸念→反転のストーリーラインを\n"
+    "  作成してください」と指示した結果、反転を裏付ける情報が履歴に一切無いまま\n"
+    "  「市場は再評価が進んでいる段階」と作文させてしまった事故が起きている。\n"
+    "- 「ストーリー」「対比構造」「説得力」「網羅性」を理由に加筆を求めないこと。\n"
+    "  これは報告書であって物語ではない。空白のまま残す方が、埋めるより良い。\n"
+    "- 実行履歴に無い情報の追加を求めないこと。履歴に無いなら、\n"
+    "  「確認できなかった」と書かせるのが正しい対応である。\n"
+    "- 章立てが揃っていないこと自体は問題ではない。情報が無い章は削らせること。\n"
+    "- 「欠落している」と指摘するときは、その情報が実行履歴や数値一覧の\n"
+    "  どこにあるかを示すこと（例:「Step 4 の検索結果にある」）。\n"
+    "  在り処を示せば、エージェントは再検索せず読み直しで直せる。\n"
+    "- 誤りの削除を求めるときは、正しい値への置き換えまで指示すること。\n"
+    "  「この記述は不正確です。削除するか、次の正しい値に置き換えてください: ◯◯」\n"
+    "  という形にすること。削除だけの指示は禁止。置き換える値が履歴に無い\n"
+    "  場合は「置き換えられる値は履歴にありません」と明記すること。\n"
+    "- **文章の構成・トーン・見出しの型・章の並びに口を出さないこと。**\n"
+    "  レビュアーの仕事は事実と出典の整合性の検証だけである。\n"
+    "- 「懸念点と好材料を対比させて」のような書き方の指示は、\n"
+    "  **その両方が実際に検索結果に存在する場合に限る**。\n"
+    "  片方しか無いなら、無い側を書かせないこと。\n"
     "\n"
     "## 回答形式\n"
     "VERDICT: OK または NEEDS_REVISION\n"
@@ -186,19 +238,28 @@ def _build_history_summary(history: list, max_entries: int = 8, max_chars: int =
 
 # ===== 各レビュアー実装 =====
 
-def fact_checker(task: str, output: str, history: list = None) -> dict:
-    """事実検証専門のレビュアー"""
+def fact_checker(task: str, output: str, history: list = None,
+                 findings: list = None) -> dict:
+    """
+    事実検証専門のレビュアー。
+
+    履歴は文字数で切り詰められるため、古いステップの数値は視野から外れる。
+    数値台帳（findings）は切り詰められないので、こちらも併せて渡すことで
+    「履歴にあったのに回答から欠落した数値」を検出できるようにする。
+    """
     llm = get_llm(temperature=0.1)
     today = datetime.now().strftime("%Y年%m月%d日")
     # 時系列比較のため、他レビュアーより多めの文字数・件数で履歴を渡す
     history_summary = _build_history_summary(history or [], max_entries=10, max_chars=600)
+    ledger = format_findings(findings or [])
 
     messages = [
         {"role": "system", "content": FACT_CHECKER_PROMPT},
         {"role": "user", "content": (
             f"## 現在の日付\n{today}\n\n"
             f"## タスク\n{task}\n\n"
-            f"## エージェントの実行履歴（抜粋）\n{history_summary}\n\n"
+            + (f"## 調査中に取得した数値・日付（原文のまま）\n{ledger}\n\n" if ledger else "")
+            + f"## エージェントの実行履歴（抜粋）\n{history_summary}\n\n"
             f"## エージェントの最終回答\n{output[:1500]}\n\n"
             f"上記をチェックしてください。"
         )},
@@ -286,6 +347,210 @@ def generic_reviewer(task: str, output: str, history: list = None) -> dict:
     return result
 
 
+# ===== 機械チェック（LLMを使わないレビュアー） =====
+
+def _history_numbers(history: list, sources: list = None) -> list[dict]:
+    """
+    照合の母集団を作る。検索結果（role=result）と、出典本文から抽出した
+    facts の両方を対象にする。
+
+    ここは置換候補の母集団でもある。内部メッセージを混ぜると、correct が
+    却下したばかりの値を「候補」として提案し返すことになる。
+    """
+    # URLは潰す。潰さないと %XX が「XX%」として候補に並び、照合も素通りする
+    texts = [mask_urls(t) for t in source_texts(history)]
+    numbers = []
+    for t in texts:
+        numbers.extend(extract_numbers(t))
+    for s in (sources or []):
+        for f in s.get("facts", []):
+            numbers.extend(extract_numbers(f.get("raw", "")))
+    return numbers
+
+
+def _forecast_in_context(history: list, findings: list) -> bool:
+    """取得済みの情報に、予想値であることを示す語が含まれているか。
+
+    差し戻し文にも「予想」の語は普通に出るので、出典だけを見る。
+    """
+    texts = source_texts(history)
+    texts += [f.get("context", "") for f in (findings or [])]
+    return any(w in t for t in texts for w in FORECAST_WORDS)
+
+
+def numeric_checker(output: str, history: list = None, sources: list = None,
+                    findings: list = None, previous_output: str = None) -> dict:
+    """
+    回答中の数値を、実行履歴と出典から機械的に突き合わせる。LLMは使わない。
+
+    チェックA: 換算併記の整合
+        「9兆ウォン（約9兆円）」のように、ウォンと円がほぼ同値になっている等、
+        桁として成立しない換算を検出する。出典を見ずに回答単体で判定できる。
+
+    チェックB: 未照合の数値
+        回答中の単位付き数値が、検索結果にも出典にも存在しない場合に指摘する。
+        株価の時系列表は単位も区切りも無く TOKEN_RE では拾えないため、
+        専用経路（ohlc_values）で読んだ値とも突き合わせる。実測で、原文に
+        ある終値・高値・安値を「出典に無い」と却下した事故が起きている。
+
+    チェックC: 予想を実績として書いていないか
+        [実績] と書かれた数値の出典側の文脈に「予想」「コンセンサス」等が
+        あれば指摘する。実測で、発表前のコンセンサスを実績として書いた事故がある。
+
+    チェックD: 種別タグの欠落
+        単位付き数値に [実績] / [予想] が1つも付いていない場合に指摘する。
+        数値ごとに指摘すると量が増えるため、全体で1件にまとめる。
+
+    チェックF: 符号の食い違い
+        「+5.2%（-1,200円）」のように、変動率と変動額の符号が逆の記述を検出する。
+
+    チェックE: 情報量の後退
+        前回の回答にあり台帳にも裏付けがあった数値が、今回消えていれば指摘する。
+        訂正ループは「消す」方向にしか働かないため、実績値ごと落ちることがある。
+
+    LLMに数値照合をさせない理由は docs/accuracy-improvements.md §0.1 を参照。
+    実測で、書く側と検証する側の双方が「ありそうな値」へ無意識に正規化していた。
+    """
+    issues = []
+
+    # 回答本文のURLも潰す。§7 で出典明記を求めているので、回答に
+    # 「出典: https://…」が入るのは通常のケース。潰さないと %XX が
+    # 「XX%」として拾われ、1本のURLで7件の偽の指摘が出る。
+    # 差し戻しの枠には余白が無いので、偽の指摘が本物の枠を消費してしまう。
+    #
+    # 判定はこのマスク済みテキストに対して行い、指摘文に載せる位置や
+    # 本文の書き換え（mechanical_fixes）は元のテキストのまま扱う。
+    # 空白で潰しているので start / end は元テキストと一致する。
+    ans = mask_urls(output or "")
+
+    for pair in find_conversion_pairs(ans):
+        if not conversion_plausible(pair):
+            issues.append(
+                f"換算が矛盾しています: 「{pair['raw']}」。"
+                f"{pair['src_unit']}と{pair['dst_unit']}の比率が桁として成立していません"
+                f"（比率 {pair['ratio']:.3g}）。"
+                f"検索結果の値をそのまま書き写せているか確認してください。"
+            )
+
+    # 連結せずテキストの並びとして持つ。連結すると、別々のページの末尾と
+    # 先頭がたまたま隣り合って「ラベルが近い」と誤判定する。
+    #
+    # 履歴からは出典由来のものだけを採る。correct / critic の差し戻し文には
+    # 却下した数値がそのまま引用されているので、混ぜるとその値が
+    # 「出典にある」ことになり、次のラウンドで素通りする。
+    # URLは潰しておく。潰さないと、回答の「88%」が出典URLの
+    # パーセントエンコーディング（%E5 等）と一致して「出典にある」ことになる
+    src_texts = [mask_urls(t) for t in (
+        source_texts(history)
+        + [f.get("context", "") for f in (findings or [])]
+        + [s.get("excerpt", "") for s in (sources or [])]
+    )]
+    # 元ページが取得上限で切れていたか。抜粋に印は残らないので、
+    # 構造化フィールドを正とし、印は後方互換のために併せて見る
+    truncated = (any(s.get("source_truncated") for s in (sources or []))
+                 or any(TRUNCATION_MARK in t for t in src_texts))
+
+    candidates = _history_numbers(history, sources)
+    # 時系列表から読み取れた価格。単位が無いので「存在するか」の判定にだけ使う
+    bare = ohlc_values(src_texts)
+    answer_labels = {lv["raw"]: primary_label(lv) for lv in labeled_values(ans)}
+    for n in extract_numbers(ans):
+        # 抽出は完璧ではない。原文にその表記がそのまま出ているなら、
+        # 「出典に無い」と断じない（実測で、原文にある売上高が却下された）
+        if (not matches_any(n, candidates)
+                and not appears_verbatim(n["raw"], src_texts)
+                and not matches_bare(n, bare)):
+            label = answer_labels.get(n["raw"], "")
+            kind, hints = candidate_suggestion(n, findings or [], label=label)
+            if kind == "labeled":
+                suggestion = (f"【置換候補】{'、'.join(hints)}"
+                              f"（出典で「{label}」に付いている値）に置き換えてください")
+            elif kind == "unlabeled":
+                suggestion = (f"【候補（参考）】{'、'.join(hints)}"
+                              "。単位と桁が近いだけで、同じ項目の値とは限りません")
+            else:
+                suggestion = (
+                    "【置換候補なし】"
+                    + (f"出典に「{label}」の値は見当たりません。" if label else "")
+                    + "削除するか、出典を取り直してください"
+                )
+            trunc_note = (
+                "（出典の本文が途中で切れています。切れた先に書かれている可能性があります）"
+                if truncated else ""
+            )
+            issues.append(
+                f"「{n['raw']}」は検索結果・出典のどこにも見当たりません。"
+                f"{suggestion}{trunc_note}（該当箇所: …{n['context']}…）。"
+            )
+
+    for m in label_value_mismatches(ans, findings or [], src_texts):
+        if m["reason"] == "value":
+            issues.append(
+                f"「{m['label']}」の値が出典と違います。回答は「{m['raw']}」ですが、"
+                f"出典で「{m['label']}」に対応するのは {'、'.join(m['expected'])} です。"
+                f"出典の値に置き換えてください。"
+            )
+        else:
+            issues.append(
+                f"「{m['raw']}」を「{m['label']}」として書いていますが、出典では"
+                f"{'、'.join(m['expected'])} に付いている値です"
+                f"（出典: …{m['context'][:50]}…）。"
+                f"ラベルの対応を出典どおりに直すか、この記述を削除してください。"
+            )
+
+    for t in tag_conflicts(ans, findings or []):
+        issues.append(
+            f"「{t['raw']}」の種別タグが出典と違います。回答は {t['written']} ですが、"
+            f"出典の文脈は {t['expected']} です（出典: …{t['context'][:50]}…）。"
+        )
+
+    for m in forecast_marked_as_actual(ans, findings or []):
+        issues.append(
+            f"「{m['raw']}」に [実績] と付いていますが、出典の文脈は予想です"
+            f"（出典: …{m['context'][:60]}…）。[予想] に直すか、"
+            f"実績値を検索して置き換えてください。"
+        )
+
+    untagged, total = untagged_ratio(ans)
+    if total and untagged == total and _forecast_in_context(history, findings):
+        # タグの欠落を常に差し戻すと、予想と実績の取り違えが起こりえない
+        # タスクでも書式だけのために1ラウンド消える。取得済みの情報に
+        # 「予想」「コンセンサス」等が混ざっているときに限って指摘する。
+        issues.append(
+            f"数値{total}件のいずれにも [実績] / [予想] が付いていません。"
+            f"取得済みの情報には予想値が含まれています。"
+            f"判断できないものは [種別不明] と書き、省略しないでください。"
+        )
+
+    for c in sign_conflicts(ans):
+        issues.append(
+            f"符号が食い違っています: 変動率「{c['rate']}」と変動額「{c['amount']}」"
+            f"（該当箇所: …{c['context']}…）。"
+            f"どちらかが誤りです。出典で裏を取るか、"
+            f"「符号不整合のため要確認」と明記してください。"
+        )
+
+    for d in dropped_supported_numbers(mask_urls(previous_output or ""), ans,
+                                       findings or []):
+        issues.append(
+            f"前回の回答にあった「{d['raw']}」が消えています。"
+            f"この数値は取得済みの情報に裏付けがあります。"
+            f"誤りだったのでなければ、書き直しの際に戻してください。"
+        )
+
+    return {
+        "reviewer": "numeric_checker",
+        "verdict": "NEEDS_REVISION" if issues else "OK",
+        "issues": issues,
+        "instruction": (
+            "指摘された数値を、検索結果に書かれている値そのものに直してください。"
+            "単位（ウォン／円／億／兆）を変換しないこと。"
+            "換算値を併記する場合は、元の値を主として書き、換算は括弧内に留めること。"
+        ) if issues else "",
+        "raw": "",
+    }
+
+
 # ===== Dispatcher =====
 
 REVIEWER_REGISTRY = {
@@ -294,7 +559,16 @@ REVIEWER_REGISTRY = {
     "security_reviewer": security_reviewer,
     "data_analyst": data_analyst,
     "generic_reviewer": generic_reviewer,
+    "numeric_checker": numeric_checker,
 }
+
+# LLMの選定に委ねず、常に実行するレビュアー。
+# numeric_checker はLLM呼び出しを伴わないため、常時走らせてもコストが無い。
+ALWAYS_ON_REVIEWERS = ["numeric_checker"]
+
+
+def _with_always_on(names: list[str]) -> list[str]:
+    return list(dict.fromkeys(list(names) + ALWAYS_ON_REVIEWERS))
 
 
 def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> list[str]:
@@ -308,11 +582,11 @@ def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> lis
     """
     # 明示指定があれば早期return
     if output_type == "code":
-        return ["code_reviewer", "security_reviewer"]
+        return _with_always_on(["code_reviewer", "security_reviewer"])
     if output_type == "research":
-        return ["fact_checker"]
+        return _with_always_on(["fact_checker"])
     if output_type == "data":
-        return ["data_analyst"]
+        return _with_always_on(["data_analyst"])
 
     # autoの場合はLLMで判定
     llm = get_llm(temperature=0.1)
@@ -329,7 +603,7 @@ def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> lis
 
     reviewers_m = re.search(r"REVIEWERS:\s*(.+)", content)
     if not reviewers_m:
-        return ["generic_reviewer"]
+        return _with_always_on(["generic_reviewer"])
 
     reviewers_str = reviewers_m.group(1).strip()
     # 改行などで止める
@@ -337,7 +611,7 @@ def dispatch_reviewers(task: str, output: str, output_type: str = "auto") -> lis
     candidates = [r.strip() for r in reviewers_str.split(",")]
     # 有効なレビュアーだけ残す
     selected = [r for r in candidates if r in REVIEWER_REGISTRY]
-    return selected if selected else ["generic_reviewer"]
+    return _with_always_on(selected if selected else ["generic_reviewer"])
 
 
 def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
@@ -349,7 +623,14 @@ def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
             continue
         try:
             # 関数によって必要な引数が違うので、kwargsから取り出す
-            if name in ("fact_checker", "data_analyst", "generic_reviewer"):
+            if name == "fact_checker":
+                result = fn(
+                    task=kwargs.get("task", ""),
+                    output=kwargs.get("output", ""),
+                    history=kwargs.get("history", []),
+                    findings=kwargs.get("findings", []),
+                )
+            elif name in ("data_analyst", "generic_reviewer"):
                 result = fn(
                     task=kwargs.get("task", ""),
                     output=kwargs.get("output", ""),
@@ -366,15 +647,35 @@ def run_reviewers(reviewer_names: list[str], **kwargs) -> list[dict]:
                     code=kwargs.get("code", "") or kwargs.get("output", ""),
                     task=kwargs.get("task", ""),
                 )
+            elif name == "numeric_checker":
+                result = fn(
+                    output=kwargs.get("output", ""),
+                    history=kwargs.get("history", []),
+                    sources=kwargs.get("sources", []),
+                    findings=kwargs.get("findings", []),
+                    previous_output=kwargs.get("previous_output", ""),
+                )
             results.append(result)
         except Exception as e:
-            results.append({
-                "reviewer": name,
-                "verdict": "OK",
-                "issues": [],
-                "instruction": "",
-                "raw": f"レビュアー実行エラー: {e}",
-            })
+            # LLMレビュアーの失敗はOK扱いにする（API不調で全体を止めないため）。
+            # ただし機械チェックの失敗は実装の不具合であり、黙って通すと
+            # 検証していないのに検証したことになるので、issueとして残す。
+            if name in ALWAYS_ON_REVIEWERS:
+                results.append({
+                    "reviewer": name,
+                    "verdict": "OK",
+                    "issues": [f"{name} の実行に失敗しました（数値の機械照合は未実施）: {e}"],
+                    "instruction": "",
+                    "raw": "",
+                })
+            else:
+                results.append({
+                    "reviewer": name,
+                    "verdict": "OK",
+                    "issues": [],
+                    "instruction": "",
+                    "raw": f"レビュアー実行エラー: {e}",
+                })
     return results
 
 

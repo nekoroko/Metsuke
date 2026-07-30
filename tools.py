@@ -1,28 +1,15 @@
 # tools.py — エージェントが使うツール群
 import os
+import re
 import json
 import sqlite3
-import subprocess
-import tempfile
 import urllib.request
 import urllib.parse
+from html.parser import HTMLParser
+from paths import DB_PATH as AGENT_STUDIO_DB  # db.py（UI側）と同一のDBを指す
+from settings_store import read_settings as _read_settings
 
 WORKSPACE = "/tmp/agent_workspace"
-AGENT_STUDIO_DB = os.path.expanduser("~/agent-studio/agent_studio.db")
-
-
-def _read_settings() -> dict:
-    """agent-studioのDBから設定を読み込む。失敗時は空dict。"""
-    try:
-        if not os.path.exists(AGENT_STUDIO_DB):
-            return {}
-        conn = sqlite3.connect(AGENT_STUDIO_DB)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT key, value FROM settings").fetchall()
-        conn.close()
-        return {r["key"]: r["value"] for r in rows}
-    except Exception:
-        return {}
 
 
 def read_file(path: str) -> str:
@@ -76,38 +63,98 @@ def list_directory(path: str = "") -> str:
 
 
 def run_shell(command: str) -> str:
-    """シェルコマンドを実行する（VM上で直接実行）"""
+    """
+    シェルコマンドをサンドボックス内で実行する。
+
+    以前はホスト上で直接実行しており、エージェントは generate_code の
+    Podman隔離を run_shell で回避できてしまっていた。全実行経路の
+    サンドボックス化に伴い、ここも通す。
+
+    エージェントが実行時に組み立てるコマンドはレビューを経ていないため、
+    通信は遮断する（PROFILE_AGENT_SHELL）。
+    """
+    from sandbox import execute_shell_in_sandbox, PROFILE_AGENT_SHELL
+
+    result = execute_shell_in_sandbox(command, **PROFILE_AGENT_SHELL)
+    output = result["stdout"]
+    if result["stderr"]:
+        output += f"\n[stderr]\n{result['stderr']}"
+    return output[:2000] if output.strip() else "(出力なし)"
+
+
+class _TextExtractor(HTMLParser):
+    """HTMLから本文テキストだけを取り出す"""
+
+    SKIP = {"script", "style", "noscript", "head", "svg"}
+    BREAK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.buf = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip_depth += 1
+        elif tag in self.BREAK:
+            self.buf.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.buf.append(data)
+
+
+def html_to_text(html: str) -> str:
+    """
+    HTMLをテキストへ変換する。
+
+    beautifulsoup4 はサンドボックスイメージ側にしか無く、ホストでは使えないため
+    標準ライブラリの html.parser を使う。script/style の中身は捨てる
+    （JS内の文字列が本文の数値と混ざると、数値照合の母集団が汚れるため）。
+    """
+    parser = _TextExtractor()
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=WORKSPACE,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
-        return output[:2000] if output else "(出力なし)"
-    except subprocess.TimeoutExpired:
-        return "エラー: タイムアウト（30秒）"
-    except Exception as e:
-        return f"エラー: {e}"
+        parser.feed(html)
+    except Exception:
+        return html
+    text = "".join(parser.buf)
+    text = re.sub(r"[ \t　]{2,}", " ", text)
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
+FETCH_MAX_CHARS = 8000
 
 
 def fetch_url(url: str) -> str:
-    """URLを取得する"""
+    """
+    URLを取得して本文テキストを返す。
+
+    以前は生のHTMLを先頭3000文字返していたため、タグとJSでほとんどが埋まり、
+    本文にたどり着かないことが多かった。タグを除去したうえで上限を広げている。
+    """
     try:
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0"}
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            content = resp.read().decode("utf-8", errors="replace")
-        return content[:3000]
+            raw = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return f"エラー: {e}"
+
+    text = html_to_text(raw) if "<" in raw[:1000] else raw
+    if not text.strip():
+        return "本文を抽出できませんでした（JavaScriptで描画されるページの可能性があります）。"
+    if len(text) > FETCH_MAX_CHARS:
+        # 途中で切れたことを明示する。印が無いと、切れた先にあった数値を
+        # 書いたのか、無いところから作ったのかを後段が区別できない
+        from numeric import TRUNCATION_MARK
+        return text[:FETCH_MAX_CHARS] + TRUNCATION_MARK
+    return text
 
 
 # ===== Web検索: プロバイダごとの実装 =====
@@ -306,40 +353,30 @@ def run_saved_tool(tool_id: str) -> str:
         if row["status"] != "verified":
             return f"エラー: ツール '{row['name']}' (ID: {tool_id}) は未検証です。検証済みのツールのみ実行できます。"
 
-        os.makedirs(WORKSPACE, exist_ok=True)
+        # 検証済みツールは executor.run_tool と同じプロファイルで実行する
+        # （呼び出し元がUIかエージェントかで実行環境が変わらないようにする）
+        from sandbox import (
+            execute_in_sandbox, build_sandbox_env, PROFILE_VERIFIED_TOOL,
+        )
 
-        with tempfile.NamedTemporaryFile(
-            mode='w', suffix='.py', delete=False,
-            encoding='utf-8', dir=WORKSPACE
-        ) as f:
-            f.write(row["code"])
-            path = f.name
+        result = execute_in_sandbox(
+            row["code"],
+            env=build_sandbox_env(),
+            **PROFILE_VERIFIED_TOOL,
+        )
 
-        try:
-            result = subprocess.run(
-                ["python3", path],
-                capture_output=True, text=True,
-                timeout=120, cwd=WORKSPACE,
-            )
-            output_parts = [f"[ツール '{row['name']}' 実行結果]"]
-            if result.returncode == 0:
-                output_parts.append("ステータス: 成功")
-                if result.stdout:
-                    output_parts.append(f"出力:\n{result.stdout}")
-                else:
-                    output_parts.append("（出力なし）")
-            else:
-                output_parts.append(f"ステータス: エラー (returncode={result.returncode})")
-                if result.stderr:
-                    output_parts.append(f"stderr:\n{result.stderr}")
-                if result.stdout:
-                    output_parts.append(f"stdout:\n{result.stdout}")
-            return "\n".join(output_parts)
-        finally:
-            os.unlink(path)
+        output_parts = [f"[ツール '{row['name']}' 実行結果]"]
+        if result["success"]:
+            output_parts.append("ステータス: 成功")
+            output_parts.append(f"出力:\n{result['stdout']}" if result["stdout"] else "（出力なし）")
+        else:
+            output_parts.append("ステータス: エラー")
+            if result["stderr"]:
+                output_parts.append(f"stderr:\n{result['stderr']}")
+            if result["stdout"]:
+                output_parts.append(f"stdout:\n{result['stdout']}")
+        return "\n".join(output_parts)
 
-    except subprocess.TimeoutExpired:
-        return f"エラー: ツール実行がタイムアウトしました（120秒）"
     except Exception as e:
         return f"エラー: {e}"
 
@@ -356,7 +393,9 @@ TOOL_REGISTRY = {
     "run_shell": {"fn": run_shell, "permission": "execute", "verifiable": False},
     "fetch_url": {"fn": fetch_url, "permission": "read", "verifiable": False},
     "web_search": {"fn": web_search, "permission": "read", "verifiable": True},
-    "suggest_keywords": {"fn": suggest_keywords, "permission": "read", "verifiable": True},
+    # サジェスト一覧は「クエリの意図に答えているか」という判定になじまない。
+    # 実際に妥当なサジェストへ「不十分」と判定し、劣化したクエリを提案していた。
+    "suggest_keywords": {"fn": suggest_keywords, "permission": "read", "verifiable": False},
     "list_saved_tools": {"fn": list_saved_tools, "permission": "read", "verifiable": False},
     "run_saved_tool": {"fn": run_saved_tool, "permission": "execute", "verifiable": False},
 }

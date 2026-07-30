@@ -1,0 +1,221 @@
+# ui/page_history.py — 実行履歴
+#
+# app.py から分割した画面。st.Page には render を callable として渡す。
+
+import json
+
+import streamlit as st
+
+import graphs
+import llm_profiles
+from db import get_executions
+from trace_view import (
+    format_trace_lines,
+    node_label,
+    parse_trace,
+    skipped_count,
+    trace_rows,
+)
+from ui.common import badge
+
+
+def parse_llm_info(raw) -> dict:
+    """executions.llm_info（JSON）を読む。無い・壊れていれば空dict。"""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        info = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def build_export_text(execution: dict, history: list = None, trace: list = None) -> str:
+    """
+    実行結果とエージェントの実行履歴を1つのテキストにまとめる。
+
+    st.code に渡すとStreamlitが標準でコピーアイコンを付けるため、
+    追加のJavaScriptなしで一括コピーできる。
+
+    モデル名を入れているのは、貼って比較するときに「どのモデルの結果か」が
+    テキスト単体で分かる必要があるため。api_key は llm_info に入っていない
+    （llm_profiles.SNAPSHOT_FIELDS の時点で除いてある）。
+    """
+    e = execution
+    lines = [
+        f"# {e.get('target_name', '?')}",
+        "",
+        f"- 実行ID: {e['id']}",
+        f"- 種別: {e.get('exec_type', '')} / トリガー: {e.get('trigger', '')}",
+        f"- 状態: {e.get('status', '')}",
+        f"- 開始: {e.get('started_at', '')}",
+    ]
+    if e.get("finished_at"):
+        lines.append(f"- 完了: {e['finished_at']}")
+
+    run_name = graphs.run_label(e.get("graph_kind"), trace)
+    if run_name:
+        lines.append(f"- グラフ: {run_name}")
+
+    info = parse_llm_info(e.get("llm_info"))
+    if info:
+        lines.append(f"- モデル: {llm_profiles.snapshot_label(info)}")
+        tokens = str(info.get("max_output_tokens") or "").strip()
+        if tokens:
+            lines.append(f"- 最大出力トークン: {tokens}")
+        lines.append(
+            "- Thinking: "
+            + ("無効" if (info.get("disable_thinking") or "true") == "true" else "有効")
+        )
+
+    if e.get("stdout"):
+        lines += ["", "## 出力", "", e["stdout"]]
+    if e.get("stderr"):
+        lines += ["", "## エラー出力", "", "```", e["stderr"], "```"]
+
+    if trace:
+        # ノード遷移は履歴より先に置く。どの経路を通ったかが分かっていると、
+        # 後続の発話ログのどこが飛ばされたのかを読み解きやすい。
+        lines += ["", f"## ノード遷移（{len(trace)}件）", ""]
+        lines += format_trace_lines(trace)
+
+    if history:
+        # 見出しは実行に使ったグラフの名前にする。ReAct固定ではなくなったため
+        lines += ["", f"## {graphs.log_title(e.get('graph_kind'), trace)}"
+                      f"（{len(history)}件）"]
+        for i, entry in enumerate(history, 1):
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            if role == "assistant":
+                lines += ["", f"### {i}. エージェント", "", content]
+            elif role == "result":
+                lines += ["", f"### {i}. 実行結果", "", "```", content, "```"]
+            else:
+                lines += ["", f"### {i}. {role}", "", content]
+
+    return "\n".join(lines)
+
+
+def render():
+    st.subheader("実行履歴")
+    st.caption("手動実行・定期実行の結果を確認する")
+    st.divider()
+
+    execs = get_executions(limit=100)
+
+    f1, f2, f3 = st.columns([2, 2, 1])
+    status_filter = f1.radio(
+        "状態", ["すべて", "完了", "エラー", "実行中"],
+        horizontal=True, label_visibility="collapsed", key="hist_status",
+    )
+    type_filter = f2.radio(
+        "種別", ["すべて", "ツール", "エージェント"],
+        horizontal=True, label_visibility="collapsed", key="hist_type",
+    )
+    if f3.button("🔄 更新", use_container_width=True):
+        st.rerun()
+
+    if status_filter != "すべて":
+        want = {"完了": "done", "エラー": "error", "実行中": "running"}[status_filter]
+        execs = [e for e in execs if e["status"] == want]
+    if type_filter != "すべて":
+        want = "tool" if type_filter == "ツール" else "agent"
+        execs = [e for e in execs if e["exec_type"] == want]
+    execs = execs[:30]
+    if not execs:
+        st.caption("まだ実行履歴がありません。")
+    else:
+        for e in execs:
+            t_icon = "🔧" if e["exec_type"] == "tool" else "🧠"
+            t_label = {"manual": "手動", "schedule": "定期"}.get(e["trigger"], e["trigger"])
+
+            # 実行結果はカードで表示し、出力・エラー・実行ログを
+            # それぞれ折りたたみに分ける。以前は全体が1つのexpanderに
+            # 入っていたため、一覧の時点では状態や所要時間が読めなかった。
+            try:
+                history = json.loads(e["history"]) if e.get("history") else None
+            except (json.JSONDecodeError, TypeError):
+                history = None
+            trace = parse_trace(e.get("trace"))
+            # 実行ログの呼び名は、その実行で使ったグラフの名前にそろえる
+            run_name = graphs.run_label(e.get("graph_kind"), trace)
+            log_name = graphs.log_title(e.get("graph_kind"), trace)
+            graph_badge = f' {badge("muted", run_name)}' if run_name else ""
+            llm_info = parse_llm_info(e.get("llm_info"))
+            model_name = (llm_info.get("model") or "").strip()
+            model_badge = f' {badge("muted", model_name)}' if model_name else ""
+
+            with st.container(border=True):
+                head_l, head_r = st.columns([5, 2])
+                with head_l:
+                    st.markdown(
+                        f'<p class="as-card-title">{t_icon} {e.get("target_name", "?")} '
+                        f'{badge(e["status"])} {badge("muted", t_label)}'
+                        f'{graph_badge}{model_badge}</p>'
+                        f'<p class="as-meta">開始 {e["started_at"][:19]}'
+                        + (f' / 完了 {e["finished_at"][:19]}' if e.get("finished_at") else "")
+                        + "</p>",
+                        unsafe_allow_html=True,
+                    )
+                with head_r:
+                    st.markdown(
+                        f'<p class="as-meta" style="text-align:right">'
+                        f'ID {e["id"]}<br>{e["exec_type"]}</p>',
+                        unsafe_allow_html=True,
+                    )
+
+                if e.get("stdout"):
+                    with st.expander("📤 出力", expanded=False):
+                        st.markdown(e["stdout"])
+                if e.get("stderr"):
+                    with st.expander("⚠️ エラー出力", expanded=False):
+                        st.code(e["stderr"])
+                if trace:
+                    skipped = skipped_count(trace)
+                    label = f"🔀 ノード遷移（{len(trace)}件"
+                    label += f" / スキップ {skipped}件）" if skipped else "）"
+                    with st.expander(label, expanded=False):
+                        st.caption(
+                            "どのノードからどのノードへ遷移し、そこで何をしたか。"
+                            "「スキップ」は予算切れや前提不足でノードが素通りしたことを表す。"
+                        )
+                        st.dataframe(
+                            trace_rows(trace),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        if skipped:
+                            st.caption("スキップされたノードの理由:")
+                            for entry in trace:
+                                if entry.get("skipped"):
+                                    st.markdown(
+                                        f"- **#{entry.get('seq')} "
+                                        f"{node_label(entry.get('node', ''))}** — "
+                                        f"{entry.get('note') or entry.get('summary', '')}"
+                                    )
+                if history:
+                    with st.expander(f"🔁 {log_name}（{len(history)}件）", expanded=False):
+                        for entry in history:
+                            if entry["role"] == "assistant":
+                                st.markdown(f"🤖 {entry['content']}")
+                            elif entry["role"] == "result":
+                                st.code(entry["content"])
+                if any(e.get(k) for k in ("stdout", "stderr", "history", "trace")):
+                    export_text = build_export_text(e, history, trace)
+                    with st.expander("📋 まとめてコピー", expanded=False):
+                        st.caption(
+                            f"結果・ノード遷移・{log_name}を1つのテキストに"
+                            "まとめています。右上のコピーアイコンで全体をコピーできます。"
+                        )
+                        st.code(export_text, language="markdown")
+                        st.download_button(
+                            "⬇️ .md でダウンロード",
+                            data=export_text.encode("utf-8"),
+                            file_name=f"exec_{e['id']}.md",
+                            mime="text/markdown",
+                            key=f"dl_{e['id']}",
+                        )
+                else:
+                    st.caption("（記録された出力はありません）")
