@@ -475,6 +475,14 @@ def add_schedule(exec_type, target_id, cron_expr):
     conn.close()
     return sched_id
 
+def get_all_schedules():
+    """有効・無効を問わず全件。API の一覧はトグルも見せるため両方要る。"""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM schedules ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 def get_all_enabled_schedules():
     conn = get_connection()
     rows = conn.execute("SELECT * FROM schedules WHERE enabled = 1").fetchall()
