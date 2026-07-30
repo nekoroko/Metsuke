@@ -117,7 +117,10 @@ button { font-family: inherit; }
 .sidebar-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-.main-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* 通常のページは縦に伸びてここがスクロールする。実行詳細だけは
+ * .run-page が flex:1 で高さを取り、内側の枠が個別にスクロールする */
+.main-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.main-scroll > * { min-height: 0; }
 
 .page-header {
   padding: 18px var(--space-6) 14px;
@@ -561,3 +564,60 @@ textarea.input { font-family: 'Roboto Mono', ui-monospace, monospace; font-size:
 }
 .help-body td { padding: 6px var(--space-2); border-bottom: 1px solid var(--color-divider); }
 .help-body strong { font-weight: 600; }
+
+/* ===== 実行詳細のレイアウト =====
+ *
+ * ① ヘッダーは固定、②③④ はそれぞれ独立してスクロールする。
+ * ページ全体を縦フレックスにして、本体だけが伸びるようにする
+ * （外側の .main-scroll に任せると、ヘッダーごと流れてしまう）。
+ */
+
+.run-page { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.run-header { flex: none; }
+
+.split { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.split-left { flex: none; min-width: 0; display: flex; }
+.split-right { flex: 1; min-width: 0; display: flex; }
+
+/* 左右の境界。掴めることが分かる程度に太くする（罫線は2pxのまま見せる） */
+.split-bar {
+  flex: none;
+  width: 7px;
+  cursor: col-resize;
+  background: var(--color-divider);
+  background-clip: content-box;
+  border-left: 3px solid var(--color-bg);
+  border-right: 2px solid var(--color-bg);
+  padding: 0;
+}
+.split-bar:hover, .split-bar.on { border-left-color: var(--color-accent-200); border-right-color: var(--color-accent-200); }
+.split-bar.on { background: var(--color-accent); }
+
+/* 縦に積む枠。上が固定・下がスクロール */
+.pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.pane-head {
+  flex: none;
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+  padding: 10px var(--space-4);
+  border-bottom: 2px solid var(--color-divider);
+}
+.pane-fixed { flex: none; }        /* ③ スクロールしない */
+.pane-scroll { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4); }
+
+.reviewer-list { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; }
+
+.final-body { font-size: 14px; line-height: 1.8; }
+.final-body h1 { font: 800 20px var(--font-heading); margin: var(--space-6) 0 var(--space-3); }
+.final-body h1:first-child { margin-top: 0; }
+.final-body h2 { font: 800 17px var(--font-heading); margin: var(--space-6) 0 var(--space-2); }
+.final-body h3 { font: 600 15px var(--font-heading); margin: var(--space-4) 0 var(--space-2); }
+.final-body p { margin: 0 0 var(--space-3); }
+.final-body ul, .final-body ol { margin: 0 0 var(--space-3); padding-left: 20px; }
+.final-body li { margin-bottom: 4px; }
+.final-body code {
+  font: 400 12.5px 'Roboto Mono', ui-monospace, monospace;
+  background: var(--color-surface); padding: 1px 5px;
+}
+.final-body table { width: 100%; border-collapse: collapse; margin: 0 0 var(--space-4); }
+.final-body th { text-align: left; padding: 6px var(--space-2); border-bottom: 2px solid var(--color-divider); }
+.final-body td { padding: 6px var(--space-2); border-bottom: 1px solid var(--color-divider); }

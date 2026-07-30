@@ -79,6 +79,8 @@ export interface Execution {
   started_at: string
   finished_at: string | null
   steps?: Step[]
+  /** そのグラフのステップ上限。画面で決め打ちしない */
+  max_steps: number
 }
 
 export interface Schedule {

@@ -141,6 +141,15 @@ class TestExecutions(_ApiCase):
         self.assertEqual(steps[0]["action"], "web_search(x)")
         self.assertEqual(steps[1]["role"], "result")
 
+    def test_ステップ上限をグラフごとに返す(self):
+        # 画面で決め打ちすると「STEP 5 / 12」のように実在しない上限が出る
+        eid = self._exec_with()
+        self.assertEqual(self.client.get(f"/api/executions/{eid}").json()["max_steps"], 10)
+        tid = db.add_agent_task("r", "", "p")
+        rid = db.add_execution("agent", tid, "r")
+        db.set_execution_graph_kind(rid, "research")
+        self.assertEqual(self.client.get(f"/api/executions/{rid}").json()["max_steps"], 18)
+
     def test_中身が無くても壊れない(self):
         got = self.client.get(f"/api/executions/{self._exec_with()}").json()
         self.assertEqual(got["history"], [])

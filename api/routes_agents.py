@@ -111,6 +111,10 @@ def _execution_out(row: dict) -> dict:
             out[key] = [] if key != "llm_info" else {}
     out["graph_label"] = graphs.run_label(out.get("graph_kind"), out.get("trace"))
     out["model_label"] = llm_profiles.snapshot_label(out.get("llm_info"))
+    # ステップ予算はグラフごとに違う（ReAct 10 / リサーチ 18）。画面で
+    # 決め打ちすると「STEP 5 / 12」のように実在しない上限が出る
+    kind = graphs.normalize_kind(out.get("graph_kind") or "")
+    out["max_steps"] = graphs.make_state(kind, "").get("max_steps")
     return out
 
 

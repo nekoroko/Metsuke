@@ -6,10 +6,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ArrowLeftRight, RotateCcw, Square } from 'lucide-react'
+import { ArrowLeft, RotateCcw, Square } from 'lucide-react'
 import Markdown from 'react-markdown'
 
 import { api, subscribeRun } from '../api/client'
+import { SplitPane } from '../components/SplitPane'
 import { keys, useExecution, useInvalidate, useLlmProfiles } from '../api/hooks'
 import type { RunEvent, Step, TraceEntry } from '../api/types'
 import { Empty, Kicker, Progress, StatusTag, Tag, elapsed, hhmmss } from '../components/ui'
@@ -64,6 +65,11 @@ export function RunDetailPage() {
         }
         return prev
       })
+    }, () => {
+      // 再接続時。サーバは履歴を頭から流し直すので、受け側を空にする。
+      // これをしないと同じステップが積み上がり、STEP 130 / 10 のような
+      // 表示になる（実測）
+      setLive({ steps: [], trace: [] })
     })
     return stop
   }, [execId])                                        // eslint-disable-line react-hooks/exhaustive-deps
@@ -84,7 +90,8 @@ export function RunDetailPage() {
   if (query.isError || !exec) return <Empty message="この実行は見つかりませんでした。" />
 
   const profile = (profiles.data ?? []).find((p) => p.id === exec.llm_info?.id)
-  const maxSteps = 12
+  // 上限はグラフごとに違う（ReAct 10 / リサーチ 18）のでサーバから受け取る
+  const maxSteps = exec.max_steps || 0
   const currentStep = steps.filter((s) => s.role === 'assistant').length
 
   function setView(v: View) {
@@ -101,8 +108,134 @@ export function RunDetailPage() {
     navigate(`/runs/${res.exec_id}`)
   }
 
+  // 左（最終結果）と右（タイムライン等）の中身。SplitPane に渡す
+  const finalPane = (
+    <div className="pane">
+      <div className="pane-head">
+        <Kicker>最終結果 / Final Answer</Kicker>
+        <div className="row" style={{ gap: 6 }}>
+          {stdout && (
+            <button className="btn btn-ghost btn-sm" onClick={() => void navigator.clipboard.writeText(stdout)}>
+              📋 コピー
+            </button>
+          )}
+          {stdout && (
+            <a
+              className="btn btn-ghost btn-sm"
+              href={URL.createObjectURL(new Blob([stdout], { type: 'text/markdown' }))}
+              download={`exec_${exec.id}.md`}
+            >
+              ↧ Markdown
+            </a>
+          )}
+        </div>
+      </div>
+      <div className="pane-scroll">
+        {stdout ? (
+          <div className="final-body">
+            <Markdown>{stdout}</Markdown>
+          </div>
+        ) : (
+          <div
+            style={{
+              border: '1px dashed var(--color-divider)',
+              padding: 20, opacity: 0.6, fontSize: 12.5,
+            }}
+          >
+            実行が完了すると、ここに最終結果が出ます。
+          </div>
+        )}
+        {exec.stderr && <div className="notice" style={{ marginTop: 12 }}>{exec.stderr}</div>}
+      </div>
+    </div>
+  )
+
+  const workPane = (
+    <div className="pane">
+      {/* ③ レビュアーと予算。中身は短いのでスクロールさせない */}
+      <div className="pane-fixed">
+        <div className="side-block">
+          <Kicker>Critic / Reviewers</Kicker>
+          <div className="reviewer-list">
+            {REVIEWERS.map((r) => {
+              const used = trace.some((t) => (t.summary ?? '').includes(r))
+              return (
+                <span key={r} className="mono" style={{ opacity: used ? 1 : 0.5, fontSize: 11.5 }}>
+                  {r}
+                </span>
+              )
+            })}
+          </div>
+          <div className="cell-sub" style={{ marginTop: 6 }}>
+            ACTION=DONE の後に起動。要修正なら react に戻る（最大2回）。
+          </div>
+        </div>
+        <div className="side-block">
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <Kicker>Budget</Kicker>
+            <span className="run-meta" style={{ margin: 0 }}>
+              ステップ {currentStep} / {maxSteps || '—'}
+            </span>
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <Progress value={currentStep} max={maxSteps} ink />
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            {profile?.disable_thinking === false && <Tag kind="outline">Thinking 有効</Tag>}
+            {exec.llm_info?.max_output_tokens && (
+              <Tag kind="neutral">上限 {Number(exec.llm_info.max_output_tokens).toLocaleString()} tok</Tag>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ② タイムライン / グラフ / 生ログ。ここだけ独立してスクロール */}
+      <div
+        className="pane-scroll"
+        ref={mainRef}
+        onScroll={(e) => {
+          const el = e.currentTarget
+          followTail.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+        }}
+      >
+        {view === 'timeline' && (
+          <>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+              <Kicker>{exec.graph_label || 'React Loop'}</Kicker>
+              <span className="run-meta" style={{ margin: 0 }}>
+                STEP {currentStep} / {maxSteps || '—'}
+              </span>
+            </div>
+            <Progress value={currentStep} max={maxSteps} ink />
+            <div className="timeline" style={{ marginTop: 20 }}>
+              {steps.map((s, i) => (
+                <TimelineRow
+                  key={`${s.step}-${i}`}
+                  step={s}
+                  time={hhmmss(exec.started_at)}
+                  live={isRunning && i === steps.length - 1}
+                  open={openSteps.has(i)}
+                  onToggle={() =>
+                    setOpenSteps((prev) => {
+                      const next = new Set(prev)
+                      next.has(i) ? next.delete(i) : next.add(i)
+                      return next
+                    })
+                  }
+                />
+              ))}
+              {steps.length === 0 && <div style={{ opacity: 0.6 }}>まだステップがありません。</div>}
+            </div>
+          </>
+        )}
+        {view === 'graph' && <GraphView trace={trace} kind={exec.graph_kind} />}
+        {view === 'trace' && <TraceView trace={trace} steps={steps} />}
+      </div>
+    </div>
+  )
+
   return (
-    <>
+    <div className="run-page">
       <header className="run-header">
         <Link to="/runs" className="btn btn-ghost btn-sm">
           <ArrowLeft size={13} style={{ marginRight: 5 }} />
@@ -160,123 +293,16 @@ export function RunDetailPage() {
         )}
       </header>
 
-      <div className="run-body">
-        <div
-          className="run-main"
-          ref={mainRef}
-          onScroll={(e) => {
-            const el = e.currentTarget
-            followTail.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-          }}
-        >
-          {view === 'timeline' && (
-            <>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                <Kicker>{exec.graph_label || 'React Loop'}</Kicker>
-                <span className="run-meta" style={{ margin: 0 }}>
-                  STEP {currentStep} / {maxSteps}
-                </span>
-              </div>
-              <Progress value={currentStep} max={maxSteps} ink />
-              <div className="timeline" style={{ marginTop: 20 }}>
-                {steps.map((s, i) => (
-                  <TimelineRow
-                    key={`${s.step}-${i}`}
-                    step={s}
-                    time={hhmmss(exec.started_at)}
-                    live={isRunning && i === steps.length - 1}
-                    open={openSteps.has(i)}
-                    onToggle={() =>
-                      setOpenSteps((prev) => {
-                        const next = new Set(prev)
-                        next.has(i) ? next.delete(i) : next.add(i)
-                        return next
-                      })
-                    }
-                  />
-                ))}
-                {steps.length === 0 && <div style={{ opacity: 0.6 }}>まだステップがありません。</div>}
-              </div>
-            </>
-          )}
-
-          {view === 'graph' && <GraphView trace={trace} kind={exec.graph_kind} />}
-          {view === 'trace' && <TraceView trace={trace} steps={steps} />}
-        </div>
-
-        <aside className="run-side">
-          <div className="side-block">
-            <Kicker>Critic / Reviewers</Kicker>
-            <div style={{ marginTop: 8 }}>
-              {REVIEWERS.map((r) => {
-                const used = trace.some((t) => (t.summary ?? '').includes(r))
-                return (
-                  <div key={r} className="row" style={{ opacity: used ? 1 : 0.5, padding: '3px 0' }}>
-                    <span className="mono" style={{ fontSize: 12 }}>{r}</span>
-                  </div>
-                )
-              })}
-            </div>
-            <div className="cell-sub" style={{ marginTop: 8 }}>
-              ACTION=DONE の後に起動。要修正なら react に戻る（最大2回）。
-            </div>
-          </div>
-
-          <div className="side-block">
-            <Kicker>Budget</Kicker>
-            <div style={{ marginTop: 8 }}>
-              <div className="run-meta" style={{ margin: '0 0 4px' }}>
-                ステップ {currentStep} / {maxSteps}
-              </div>
-              <Progress value={currentStep} max={maxSteps} ink />
-            </div>
-            <div className="row" style={{ marginTop: 10 }}>
-              {profile?.disable_thinking === false && <Tag kind="outline">Thinking 有効</Tag>}
-              {exec.llm_info?.max_output_tokens && (
-                <Tag kind="neutral">上限 {Number(exec.llm_info.max_output_tokens).toLocaleString()} tok</Tag>
-              )}
-            </div>
-          </div>
-
-          <div className="side-block">
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <Kicker>最終結果 / Final Answer</Kicker>
-              {stdout && (
-                <button className="btn btn-ghost btn-sm" onClick={() => void navigator.clipboard.writeText(stdout)}>
-                  📋 コピー
-                </button>
-              )}
-            </div>
-            {stdout ? (
-              <div style={{ marginTop: 8, fontSize: 13.5, lineHeight: 1.7 }}>
-                <Markdown>{stdout}</Markdown>
-              </div>
-            ) : (
-              <div
-                style={{
-                  marginTop: 8, border: '1px dashed var(--color-divider)',
-                  padding: 16, opacity: 0.6, fontSize: 12.5,
-                }}
-              >
-                実行が完了すると、ここに最終結果が出ます。
-              </div>
-            )}
-            {exec.stderr && (
-              <div className="notice" style={{ marginTop: 10 }}>{exec.stderr}</div>
-            )}
-          </div>
-
-          <div className="side-block">
-            <button className="btn btn-secondary btn-block" onClick={() => void rerunWithOtherModel()}>
-              <ArrowLeftRight size={13} style={{ marginRight: 6 }} />
-              別モデルで再実行
-            </button>
-          </div>
-        </aside>
-      </div>
-    </>
+      <SplitPane
+        storageKey="runDetail.leftWidth"
+        defaultLeft={560}
+        left={finalPane}
+        right={workPane}
+      />
+    </div>
   )
 }
+
 
 function TimelineRow({
   step, time, live, open, onToggle,

@@ -103,8 +103,19 @@ export const api = {
  * なので二重表示にならない。イベントの取り込み側で seq / step を見て
  * 重複を潰す。
  */
-export function subscribeRun(execId: string, onEvent: (e: RunEvent) => void): () => void {
+export function subscribeRun(
+  execId: string,
+  onEvent: (e: RunEvent) => void,
+  onOpen?: () => void,
+): () => void {
   const source = new EventSource(`/api/executions/${execId}/stream`)
+
+  // 接続が開くたびに呼ぶ。**再接続のたびにサーバは履歴を頭から流し直す**ので、
+  // 受け側は毎回まっさらにしないと同じステップが積み上がる。
+  // 実測で STEP 130 / 10 のような表示になった（再接続のたびに全履歴が
+  // 追加されていた）。EventSource は自動で再接続するため、必ず起きる。
+  source.onopen = () => onOpen?.()
+
   source.onmessage = (msg) => {
     try {
       onEvent(JSON.parse(msg.data) as RunEvent)
