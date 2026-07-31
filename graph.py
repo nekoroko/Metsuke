@@ -8,6 +8,10 @@ from sandbox import execute_in_sandbox, PROFILE_AGENT_CODE
 from reviewers import (
     dispatch_reviewers, run_reviewers, aggregate_results, numeric_checker,
 )
+from parsing import (
+    parse_done, extract_done, extract_previous_done, find_done_entry,
+    replace_done_body,
+)
 from numeric import (
     collect_from_text, merge_findings, format_findings, pending_event_warnings,
     claims_absence, unused_numbers, extract_numbers, mechanical_fixes, TRUNCATION_MARK,
@@ -221,34 +225,13 @@ MAX_RESULT_LEN = 1000
 
 def _parse_done(text: str) -> str:
     """
-    DONE の本文を取り出す。
+    DONE の本文を取り出す。実体は parsing.parse_done。
 
-    以前は `DONE:` をテキスト中のどこからでも拾っていたため、
-    「最終回答を『DONE: 』形式で再構成します」のように**書式そのものに
-    言及した文**にヒットし、本文が「」形式で再構成します…」から始まる
-    壊れた回答になっていた。しかも直前のフォーマット警告メッセージが
-    「'DONE: ' と書いてください」と指示しているため、モデルにその文言を
-    書かせて自分で踏む形になっていた。
-
-    そのため、まず行頭の DONE: だけを見る。あわせて、実際に頻出する
-    `ACTION: DONE` 形式もフォールバックとして受け付ける
-    （これを弾くと1ループ丸ごと無駄になるうえ、再試行でも同じ形式が
-     出てくることが実測で確認されている）。
+    この名前は既存の呼び出し元・テストが参照しているので残す。
+    規則そのものは parsing.py に一本化した（以前は行頭限定の厳密版と
+    `split("DONE:")` の素朴版が同じファイル内に併存していた）。
     """
-    m = re.search(r"^[ \t　]*DONE:[ \t　]*", text, re.MULTILINE)
-    if m:
-        content = text[m.end():].strip()
-        if content:
-            return content
-
-    m = re.search(r"^[ \t　]*ACTION:[ \t　]*DONE[ \t　]*$", text, re.MULTILINE)
-    if m:
-        rest = text[m.end():].strip()
-        rest = re.sub(r"^THOUGHT:[ \t　]*", "", rest)
-        if rest:
-            return rest
-
-    return ""
+    return parse_done(text)
 
 
 def parse_action(text: str) -> dict:
@@ -840,26 +823,13 @@ def verify_tool_step(state: AgentState) -> AgentState:
 
 
 def _extract_done(history: list) -> str:
-    for entry in reversed(history):
-        if entry["role"] == "assistant" and "DONE:" in entry.get("content", ""):
-            return entry["content"].split("DONE:")[1].strip()
-    return ""
+    """最新の最終回答。実体は parsing.extract_done。"""
+    return extract_done(history)
 
 
 def _extract_previous_done(history: list) -> str:
-    """
-    1つ前の版の最終回答を返す。
-
-    訂正のたびに新しいDONEが積まれるので、直前の版と比べれば
-    「訂正の結果、正しい数値まで落ちた」ことを検出できる。
-    """
-    seen = 0
-    for entry in reversed(history or []):
-        if entry.get("role") == "assistant" and "DONE:" in entry.get("content", ""):
-            seen += 1
-            if seen == 2:
-                return entry["content"].split("DONE:")[1].strip()
-    return ""
+    """1つ前の版の最終回答。実体は parsing.extract_previous_done。"""
+    return extract_previous_done(history)
 
 
 def _diff_note(previous: str, current: str) -> str:
@@ -885,6 +855,36 @@ def _diff_note(previous: str, current: str) -> str:
     return " / ".join(parts)
 
 
+def _numeric_result(verdict: str, checked_text: str, issues: list = None,
+                    instruction: str = "", handled: str = "none") -> dict:
+    """
+    correct が出した数値照合の結果を、critic が読める形で state に載せる。
+
+    critic は同じ照合を再実行しない。以前は correct が numeric_checker を
+    直接呼び、その直後の critic も ALWAYS_ON_REVIEWERS 経由で同じ関数を
+    同じ入力に対して走らせていた（実測で2回・入力完全一致）。
+
+    二重実行は無駄なだけでなく、訂正予算の意味を壊していた。
+    `max_corrections` を使い切って correct が差し戻しを諦めたあとに、
+    critic が同じ機械指摘を再検出して react へ差し戻すため、
+    訂正の上限が critic 枠経由で迂回されていた。残ステップが尽きた
+    ケースでは、同じ指摘が verification_notes に2回積まれて
+    最終回答にも二重に出ていた。
+
+    handled:
+      "sent_back" - correct が差し戻しに使った（react で直させる）
+      "noted"     - 差し戻せず verification_notes に積んだ
+      "none"      - 指摘なし、または照合していない
+    """
+    return {
+        "verdict": verdict,
+        "issues": list(issues or []),
+        "instruction": instruction,
+        "checked_text": checked_text,
+        "handled": handled,
+    }
+
+
 def correct_step(state: AgentState) -> AgentState:
     """
     DONEの内容を機械チェックにかけ、数値の誤りがあれば訂正を差し戻す。
@@ -899,8 +899,11 @@ def correct_step(state: AgentState) -> AgentState:
     """
     done_content = _extract_done(state["history"])
     if not done_content:
-        return _with_trace(state, {**state, "status": "needs_revision"},
-            "correct", "スキップ", "critic",
+        return _with_trace(state, {
+            **state,
+            "status": "needs_revision",
+            "numeric_result": _numeric_result("SKIPPED", checked_text=""),
+        }, "correct", "スキップ", "critic",
             note="履歴にDONE本文が見つからない", skipped=True)
 
     try:
@@ -922,6 +925,9 @@ def correct_step(state: AgentState) -> AgentState:
             "status": "needs_revision",
             "verification_notes": state.get("verification_notes", [])
             + [f"数値の機械照合を実行できませんでした: {e}"],
+            "numeric_result": _numeric_result(
+                "ERROR", checked_text=done_content,
+                issues=[f"数値の機械照合を実行できませんでした: {e}"]),
         }
         return _with_trace(state, out, "correct", "照合の実行に失敗", "critic",
                            note=str(e)[:80])
@@ -969,6 +975,7 @@ def correct_step(state: AgentState) -> AgentState:
             **state,
             "confirmed": confirmed,
             "status": "needs_revision",
+            "numeric_result": _numeric_result("OK", checked_text=done_content),
         }, "correct", "数値の機械照合: 問題なし", "critic", note=diff_note)
 
     # 差し戻せるかどうかは予算次第。差し戻せない場合でも検証は済んでいるので、
@@ -1009,19 +1016,28 @@ def correct_step(state: AgentState) -> AgentState:
         applied += restored
         new_history = list(state["history"])
         if applied:
-            for i in range(len(new_history) - 1, -1, -1):
-                entry = new_history[i]
-                if entry.get("role") == "assistant" and "DONE:" in entry.get("content", ""):
-                    head = entry["content"].split("DONE:")[0]
-                    new_history[i] = {"role": "assistant",
-                                      "content": f"{head}DONE: {fixed_text}"}
-                    break
+            # 書き戻し先は「本文を取り出したのと同じエントリ」でなければならない。
+            # 以前はここで独自に末尾から "DONE:" を含むエントリを探し、
+            # `split("DONE:")[0]` を head にしていた。本文より前に "DONE:"
+            # という文字列があると切りすぎ、差し替え後の DONE: が行頭に
+            # 来なくなって最終回答が空になる。parsing 側に寄せる。
+            idx, _ = find_done_entry(new_history)
+            if idx >= 0:
+                new_history[idx] = {
+                    "role": "assistant",
+                    "content": replace_done_body(new_history[idx]["content"], fixed_text),
+                }
         return _with_trace(state, {
             **state,
             "history": new_history,
             "confirmed": confirmed,
             "status": "needs_revision",
             "verification_notes": state.get("verification_notes", []) + issues + applied,
+            # 注記として処理済み。critic はこれを見て、同じ指摘を
+            # もう一度差し戻し・注記に積まない（handled="noted"）。
+            "numeric_result": _numeric_result(
+                "NEEDS_REVISION", checked_text=fixed_text, issues=issues,
+                instruction=instruction, handled="noted"),
         }, "correct", f"数値の問題を{len(issues)}件検出（差し戻せず）", "critic",
             note=f"訂正の予算切れ。機械的に{len(applied)}件だけ適用し、残りは注記に回す")
 
@@ -1050,6 +1066,9 @@ def correct_step(state: AgentState) -> AgentState:
         "confirmed": confirmed,
         "status": "running",
         "correction_count": state.get("correction_count", 0) + 1,
+        "numeric_result": _numeric_result(
+            "NEEDS_REVISION", checked_text=done_content, issues=issues,
+            instruction=instruction, handled="sent_back"),
     }, "correct", f"数値の問題を{len(issues)}件検出", "react",
         note="訂正を差し戻した" + (f" / {diff_note}" if diff_note else ""))
 
@@ -1062,11 +1081,7 @@ def critic_step(state: AgentState) -> AgentState:
             note=f"レビューの予算切れ（{state['critique_count']}/{state['max_critiques']}）",
             skipped=True)
 
-    done_content = ""
-    for entry in reversed(state["history"]):
-        if entry["role"] == "assistant" and "DONE:" in entry["content"]:
-            done_content = entry["content"].split("DONE:")[1].strip()
-            break
+    done_content = extract_done(state["history"])
 
     if not done_content:
         return _with_trace(state, {**state, "status": "done"},
@@ -1082,13 +1097,37 @@ def critic_step(state: AgentState) -> AgentState:
     remaining_steps = state["max_steps"] - state["step_count"]
     can_send_back = remaining_steps > 1
 
+    # 数値照合は correct が済ませている（critic への入口は correct からの
+    # 1本だけ）。ここでは再実行しない。
+    #
+    # ただし将来 react → critic のような辺が足されると、照合を一度も
+    # 通らずに確定してしまう。黙って素通りさせないための保険として、
+    # 結果が載っていなければここで1回だけ走らせる。正常な経路では
+    # 到達しない（構造テスト TestNumericCheckedOnce が見張る）。
+    fallback_numeric = []
+    if not state.get("numeric_result"):
+        try:
+            fallback_numeric = [numeric_checker(
+                output=done_content,
+                history=state["history"],
+                sources=state.get("sources", []),
+                findings=state.get("findings", []),
+                previous_output=_extract_previous_done(state["history"]),
+            )]
+        except Exception as e:
+            fallback_numeric = [{
+                "reviewer": "numeric_checker", "verdict": "OK",
+                "issues": [f"numeric_checker の実行に失敗しました（数値の機械照合は未実施）: {e}"],
+                "instruction": "", "raw": "",
+            }]
+
     try:
         reviewer_names = dispatch_reviewers(state["task"], done_content, output_type="auto")
     except Exception:
         reviewer_names = ["generic_reviewer"]
 
     code_for_review = state.get("generated_code", "")
-    review_results = run_reviewers(
+    review_results = fallback_numeric + run_reviewers(
         reviewer_names,
         task=state["task"],
         output=done_content,

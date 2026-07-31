@@ -563,8 +563,21 @@ REVIEWER_REGISTRY = {
 }
 
 # LLMの選定に委ねず、常に実行するレビュアー。
-# numeric_checker はLLM呼び出しを伴わないため、常時走らせてもコストが無い。
-ALWAYS_ON_REVIEWERS = ["numeric_checker"]
+#
+# 以前はここに numeric_checker が入っていた。だが correct_step が
+# critic_step の直前で同じ関数を同じ入力に対して既に呼んでおり、
+# 実測で2回・入力完全一致だった。無駄な再実行にとどまらず、
+# 訂正予算（max_corrections）を使い切ったあとに critic 枠で同じ機械指摘が
+# もう一度差し戻しを起こす（＝上限の迂回）、同じ指摘が最終回答の注記に
+# 二重に出る、という実害が出ていた。
+#
+# 数値照合は correct_step の一箇所で行い、結果を state["numeric_result"]
+# に載せて critic へ渡す。critic は再実行しない。
+#
+# リストと _with_always_on の仕組み自体は残す。「LLMの選定に委ねず必ず
+# 走らせたいレビュアー」という枠は今後も要りうるし、run_reviewers 側の
+# 「常時レビュアーの失敗は黙って通さない」分岐もこの枠に紐づいている。
+ALWAYS_ON_REVIEWERS: list[str] = []
 
 
 def _with_always_on(names: list[str]) -> list[str]:

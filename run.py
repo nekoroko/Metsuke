@@ -1,6 +1,7 @@
 # run.py — エージェント実行スクリプト（ReActループ版）
 import os
 from graph import app
+from parsing import extract_done
 from state import make_initial_state
 
 os.makedirs("/tmp/agent_workspace", exist_ok=True)
@@ -39,10 +40,8 @@ for step in app.stream(initial_state):
 print("=== 完了 ===")
 print(f"最終ステータス: {state['status']}")
 if state["status"] == "done":
-    for entry in reversed(state["history"]):
-        if entry["role"] == "assistant" and "DONE:" in entry["content"]:
-            done_line = entry["content"].split("DONE:")[1].strip()
-            print(f"最終結果:\n{done_line}")
-            break
+    done_line = extract_done(state["history"])
+    if done_line:
+        print(f"最終結果:\n{done_line}")
 elif state["status"] == "error":
     print(f"エラー: ステップ上限({state['max_steps']})に到達")

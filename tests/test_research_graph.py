@@ -837,3 +837,203 @@ class TestDigestTruncationFlag(unittest.TestCase):
         gr.fetch_url = lambda url: "SKハイニックスの営業利益は9.2兆ウォンとなった。"
         out = gr.digest_step(self._searched())
         self.assertFalse(out["sources"][0]["source_truncated"])
+
+
+class TestBudgetInvariantWithRealReviewers(unittest.TestCase):
+    """
+    予算式の再検証を、レビュアー経路を**実物のまま**回して行う（1-1）。
+
+    既存の TestBudgetInvariantBySimulation は graph.run_reviewers ごと
+    スタブに差し替えているため、ALWAYS_ON_REVIEWERS 経由で
+    numeric_checker が呼ばれる経路をそもそも通っていなかった。
+    つまり「M3の総当たりを再実行して green」でも、今回直した二重実行は
+    一切カバーできていない。
+
+    ここでは LLM を叩く入口（compose の _ask / dispatch_reviewers /
+    LLMレビュアー）だけを差し替え、run_reviewers・ALWAYS_ON_REVIEWERS・
+    numeric_checker は実物を通す。APIキーは要らない。
+    """
+
+    def setUp(self):
+        import graph
+        import reviewers
+        self.graph = graph
+        self.reviewers = reviewers
+        self._orig = (graph.numeric_checker, graph.dispatch_reviewers,
+                      graph.run_reviewers, gr._ask,
+                      dict(reviewers.REVIEWER_REGISTRY))
+        self.numeric_calls = []
+
+        real_numeric = graph.numeric_checker
+
+        def counting(**kw):
+            self.numeric_calls.append(kw.get("output", ""))
+            return real_numeric(**kw)
+
+        # numeric_checker は実物。呼ばれた回数だけ数える
+        graph.numeric_checker = counting
+        reviewers.REVIEWER_REGISTRY["numeric_checker"] = counting
+
+        # LLM を叩く入口だけ潰す。run_reviewers 本体は実物のまま
+        graph.dispatch_reviewers = (
+            lambda task, output, output_type="auto":
+            reviewers._with_always_on(["fact_checker"]))
+        reviewers.REVIEWER_REGISTRY["fact_checker"] = lambda **kw: {
+            "reviewer": "fact_checker", "verdict": "NEEDS_REVISION",
+            "issues": ["出典と食い違う"], "instruction": "削除する", "raw": ""}
+
+        drafts = {"i": 0}
+
+        def draft(*a, **k):
+            # 出典に無い数値を必ず混ぜ、実物の numeric_checker が
+            # 毎回 NEEDS_REVISION を返す最悪ケースを作る
+            drafts["i"] += 1
+            return f"DONE: 営業利益率は{40 + drafts['i']}.5%でした。"
+
+        gr._ask = draft
+
+    def tearDown(self):
+        (self.graph.numeric_checker, self.graph.dispatch_reviewers,
+         self.graph.run_reviewers, gr._ask, registry) = self._orig
+        self.reviewers.REVIEWER_REGISTRY.clear()
+        self.reviewers.REVIEWER_REGISTRY.update(registry)
+
+    def _run(self, corrections, critiques, max_steps=18):
+        budgets = graphs._enforce_budget_invariant({
+            "max_corrections": corrections, "max_critiques": critiques,
+            "reserve_compose_for_critic": 1})
+        state = make_initial_state("決算", max_steps=max_steps, **budgets)
+        state["history"] = [{"role": "result", "content": "売上高は22.3兆ウォンだった。"}]
+
+        corrects = 0
+        node = "compose"
+        for _ in range(80):
+            if node == "compose":
+                state = gr.compose_step(state)
+                node = gr.route_after_compose(state)
+            elif node == "correct":
+                state = gr.correct_sm_step(state)
+                corrects += 1
+                node = gr.route_after_correct(state)
+            elif node == "critic":
+                state = gr.critic_sm_step(state)
+                node = gr.route_after_critic(state)
+            else:
+                break
+            state["step_count"] = state.get("step_count", 0) + 1
+            if node in (gr.END, "__end__"):
+                break
+        return state, budgets, corrects
+
+    def test_総当たりで枠が足りる(self):
+        for c in range(0, 4):
+            for k in range(0, 4):
+                with self.subTest(corrections=c, critiques=k):
+                    st, b, _ = self._run(c, k)
+                    self.assertLessEqual(
+                        st["compose_count"], b["max_composes"],
+                        "compose の実消費が式の枠を超えた")
+                    self.assertLessEqual(st["correction_count"], c)
+                    self.assertLessEqual(st["critique_count"], k)
+
+    def test_実消費は式の値と一致する(self):
+        for c, k in ((0, 0), (1, 1), (2, 2)):
+            with self.subTest(corrections=c, critiques=k):
+                st, b, _ = self._run(c, k)
+                self.assertEqual(st["compose_count"], graphs.required_composes(c, k))
+                self.assertEqual(b["max_composes"], st["compose_count"])
+
+    def test_numeric_checkerはcorrect1回につき1回だけ(self):
+        # これが今回の本丸。修正前はここが corrects の2倍近くになる
+        # （correct が直接呼び、直後の critic が ALWAYS_ON 経由で再実行）。
+        for c in range(0, 4):
+            for k in range(0, 4):
+                with self.subTest(corrections=c, critiques=k):
+                    self.numeric_calls.clear()
+                    _, _, corrects = self._run(c, k)
+                    self.assertEqual(
+                        len(self.numeric_calls), corrects,
+                        "numeric_checker が correct 以外からも呼ばれている")
+
+    def test_同じ指摘が注記に二重に載らない(self):
+        # 訂正も差し戻しもできない状況を作る。修正前は correct が積んだ
+        # 指摘と、critic が積む「（レビュー未反映）」が並んでいた。
+        #
+        # 文字列の一致では見つからない。correct は機械修正**前**の本文を、
+        # critic は修正**後**の本文（「42.5%（出典未確認）」）を見るので、
+        # 指摘に載る該当箇所の抜粋が変わるためである。同じ値について
+        # 「出典に見当たらない」が2回出ていないか、値で見る。
+        import re
+
+        st, _, _ = self._run(1, 1, max_steps=6)
+        notes = st.get("verification_notes", [])
+        self.assertTrue(notes, "差し戻せなかった指摘が消えている")
+
+        values = []
+        for n in notes:
+            if "見当たりません" not in n:
+                continue
+            m = re.search(r"「([^」]+)」", n)
+            if m:
+                values.append(m.group(1))
+        self.assertEqual(len(values), len(set(values)),
+                         f"同じ値の「出典に見当たらない」指摘が重複している: {values}")
+
+
+class TestNumericCheckedOnce(unittest.TestCase):
+    """
+    critic への入口が correct からの1本だけであること（構造の見張り）。
+
+    numeric_checker を critic から外せたのは「critic に来る前に必ず
+    correct を通る」ことが前提。将来 react → critic のような辺が
+    足されると、数値照合を一度も通らない回答が確定してしまう。
+    """
+
+    def test_criticへの辺はcorrectからだけ(self):
+        import graph
+        for status in ("running", "needs_revision", "done", "error"):
+            self.assertNotEqual(
+                graph.route_after_react({
+                    "status": status, "last_action_type": "", "last_tool_name": ""}),
+                "critic", f"react から critic へ直行する辺ができている（status={status}）")
+        self.assertNotEqual(
+            graph.route_after_verify_tool({"status": "running"}), "critic")
+        self.assertEqual(
+            graph.route_after_correct({"status": "needs_revision"}), "critic")
+
+    def test_リサーチSMでも同じ(self):
+        self.assertNotEqual(gr.route_after_compose({"status": "needs_revision"}), "critic")
+        self.assertEqual(gr.route_after_correct({"status": "needs_revision"}), "critic")
+
+    def test_結果が載っていなければcriticが保険で照合する(self):
+        # 構造が変わって correct を通らなくなった場合でも、黙って
+        # 素通りさせない（fail-safe）。
+        import graph
+        import reviewers
+        orig = (graph.numeric_checker, graph.dispatch_reviewers,
+                dict(reviewers.REVIEWER_REGISTRY))
+        calls = []
+        real = graph.numeric_checker
+
+        def counting(**kw):
+            calls.append(kw.get("output", ""))
+            return real(**kw)
+
+        graph.numeric_checker = counting
+        graph.dispatch_reviewers = lambda *a, **k: ["fact_checker"]
+        reviewers.REVIEWER_REGISTRY["fact_checker"] = lambda **kw: {
+            "reviewer": "fact_checker", "verdict": "OK", "issues": [],
+            "instruction": "", "raw": ""}
+        try:
+            state = make_initial_state("決算", **graphs.KIND_BUDGETS[graphs.RESEARCH])
+            state["history"] = [{"role": "assistant",
+                                 "content": "DONE: 営業利益率は41.2%でした。"}]
+            state.pop("numeric_result")          # correct を通らなかった状態
+            out = graph.critic_step(state)
+            self.assertEqual(len(calls), 1, "保険の照合が働いていない")
+            self.assertTrue(out.get("verification_notes")
+                            or out["status"] == "running")
+        finally:
+            (graph.numeric_checker, graph.dispatch_reviewers, registry) = orig
+            reviewers.REVIEWER_REGISTRY.clear()
+            reviewers.REVIEWER_REGISTRY.update(registry)

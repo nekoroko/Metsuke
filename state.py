@@ -33,6 +33,7 @@ class AgentState(TypedDict):
     reserve_compose_for_critic: int  # criticの差し戻し用に空けておくcompose枠
     confirmed: list[dict]     # 出典と一致して検証済みになった数値（書き換え禁止）
     fetched_urls: list[str]   # 本文取得を試みたURL（再試行の抑制に使う）
+    numeric_result: dict      # correct が出した数値照合の結果。critic はこれを見る（再実行しない）
 
 
 def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
@@ -81,4 +82,5 @@ def make_initial_state(task: str, max_steps: int = 10, max_critiques: int = 2,
         "reserve_compose_for_critic": reserve_compose_for_critic,
         "confirmed": [],
         "fetched_urls": [],
+        "numeric_result": {},
     }

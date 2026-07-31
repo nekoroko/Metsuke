@@ -58,29 +58,14 @@ def _agent_steps(agent_app, initial_state, profile):
 
 def _extract_done_text(history: list) -> str:
     """
-    履歴から最終回答を取り出す。
+    履歴から最終回答を取り出す。実体は parsing.extract_done。
 
-    行頭の DONE: を優先し、無ければ ACTION: DONE 形式も受け付ける。
-    graph._parse_done と同じ規則にそろえてある。単純に "DONE:" を
-    split すると、書式そのものに言及した文にヒットして本文が壊れる。
+    以前はここに graph._parse_done と同じ規則を**コピー**していた。
+    片方だけ直す事故を避けるため parsing.py に一本化した。
     """
-    import re as _re
+    from parsing import extract_done
 
-    for entry in reversed(history):
-        if entry.get("role") != "assistant":
-            continue
-        content = entry.get("content", "")
-        m = _re.search(r"^[ \t　]*DONE:[ \t　]*", content, _re.MULTILINE)
-        if m:
-            body = content[m.end():].strip()
-            if body:
-                return body
-        m = _re.search(r"^[ \t　]*ACTION:[ \t　]*DONE[ \t　]*$", content, _re.MULTILINE)
-        if m:
-            body = _re.sub(r"^THOUGHT:[ \t　]*", "", content[m.end():].strip())
-            if body:
-                return body
-    return ""
+    return extract_done(history)
 
 
 def _append_verification_notes(text: str, notes: list) -> str:
