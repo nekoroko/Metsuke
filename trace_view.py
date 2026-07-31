@@ -48,6 +48,46 @@ def parse_trace(raw) -> list[dict]:
     return [e for e in raw if isinstance(e, dict)]
 
 
+def cost_text(entry: dict) -> str:
+    """
+    そのノードの所要時間とトークンを1行にする。
+
+    計測が無い（＝この機能より前に走った）実行では空文字を返す。
+    0 を作らない。「計測していない」と「0だった」は違う。
+    """
+    from metrics import fmt_ms, fmt_tokens
+
+    if entry.get("elapsed_ms") is None:
+        return ""
+    parts = [fmt_ms(entry.get("elapsed_ms"))]
+    if entry.get("llm_calls"):
+        parts.append(f"LLM {entry['llm_calls']}回 {fmt_ms(entry.get('llm_ms'))}")
+        parts.append(fmt_tokens(entry))
+    return " / ".join(parts)
+
+
+def totals_text(trace: list[dict]) -> str:
+    """実行全体の合計を1行にする。"""
+    from metrics import fmt_ms, fmt_tokens
+
+    measured = [e for e in trace if e.get("elapsed_ms") is not None]
+    if not measured:
+        return "（この実行では所要時間・トークンを計測していません）"
+    total = {k: sum(e.get(k) or 0 for e in measured)
+             for k in ("elapsed_ms", "llm_ms", "llm_calls",
+                       "input_tokens", "output_tokens", "reasoning_tokens",
+                       "missing_usage")}
+    share = (f"{round(total['llm_ms'] / total['elapsed_ms'] * 100)}%"
+             if total["elapsed_ms"] else "—")
+    return (
+        f"合計 {fmt_ms(total['elapsed_ms'])}"
+        f"（うちLLM待ち {fmt_ms(total['llm_ms'])} = {share}）"
+        f" / LLM {total['llm_calls']}回 / {fmt_tokens(total)}"
+        + (f" / thinking {total['reasoning_tokens']:,}"
+           if total["reasoning_tokens"] else "")
+    )
+
+
 def counters_text(entry: dict) -> str:
     """そのノードを抜けた時点のカウンタを1行にまとめる。"""
     return (
@@ -72,6 +112,7 @@ def trace_rows(trace: list[dict]) -> list[dict]:
             "次": e.get("next") or _END,
             "status": e.get("status", ""),
             "カウンタ": counters_text(e),
+            "所要・トークン": cost_text(e),
         })
     return rows
 
@@ -91,6 +132,9 @@ def format_trace_lines(trace: list[dict]) -> list[str]:
             f"    次: {e.get('next') or _END} / status={e.get('status', '')} / "
             f"{counters_text(e)}"
         )
+        cost = cost_text(e)
+        if cost:
+            lines.append(f"    所要: {cost}")
     return lines
 
 

@@ -148,11 +148,97 @@ def pick_profile(wanted: str):
     return None
 
 
+def _width(text: str) -> int:
+    """
+    表示幅。日本語やアイコンは2桁ぶん取る。
+
+    east_asian_width だけでは足りない。✍(U+270D) は 'N'（半角扱い）だが、
+    ほとんどの端末では絵文字として2桁で描かれる。異体字セレクタ
+    （U+FE0F）は幅を持たない。この2つを補正しないと表がずれる。
+    """
+    import unicodedata
+
+    total = 0
+    for c in text:
+        if c == "\ufe0f" or unicodedata.combining(c):
+            continue
+        code = ord(c)
+        if unicodedata.east_asian_width(c) in "WFA":
+            total += 2
+        elif 0x2190 <= code <= 0x2BFF or 0x1F300 <= code <= 0x1FAFF:
+            total += 2          # 記号・絵文字ブロック
+        else:
+            total += 1
+    return total
+
+
+def _pad(text: str, width: int) -> str:
+    """左寄せ。len ではなく表示幅で詰める（そうしないと表がずれる）。"""
+    return text + " " * max(1, width - _width(text))
+
+
+def _rpad(text: str, width: int) -> str:
+    """右寄せ。"""
+    return " " * max(1, width - _width(text)) + text
+
+
+def format_cost_table(trace: list) -> str:
+    """
+    ノード別の所要時間・トークンを表にする。
+
+    同じノードが何度も回る（react が何周もする）ので、ノード名でまとめて
+    「どこに時間を使ったか」を見えるようにする。行の順は総時間の降順。
+    """
+    import metrics
+    from trace_view import node_label
+
+    measured = [e for e in trace if e.get("elapsed_ms") is not None]
+    if not measured:
+        return "（計測なし。この実行はトークン・所要時間を記録していません）"
+
+    by_node = {}
+    for e in measured:
+        acc = by_node.setdefault(e.get("node", "?"), {
+            "count": 0, "elapsed_ms": 0, "llm_ms": 0, "llm_calls": 0,
+            "input_tokens": 0, "output_tokens": 0, "missing_usage": 0,
+        })
+        acc["count"] += 1
+        for k in ("elapsed_ms", "llm_ms", "llm_calls",
+                  "input_tokens", "output_tokens", "missing_usage"):
+            acc[k] += e.get(k) or 0
+
+    total_ms = sum(a["elapsed_ms"] for a in by_node.values()) or 1
+    rows = sorted(by_node.items(), key=lambda kv: -kv[1]["elapsed_ms"])
+
+    label_w = 36
+    # 見出しも表示幅で詰める。'回'/'所要'/'占有' は全角なので、
+    # 素の f-string の :>4 は文字数で数えて data 行とずれる
+    head = (f"  {_pad('ノード', label_w)}{_rpad('回', 4)}{_rpad('所要', 10)}"
+            f"{_rpad('占有', 7)}{_rpad('LLM', 5)}{_rpad('in', 9)}{_rpad('out', 8)}")
+    lines = [head, "  " + "-" * (_width(head) - 2)]
+    for name, a in rows:
+        share = f"{round(a['elapsed_ms'] / total_ms * 100)}%"
+        tokens_in = f"{a['input_tokens']:,}" if a["input_tokens"] else "—"
+        tokens_out = f"{a['output_tokens']:,}" if a["output_tokens"] else "—"
+        lines.append(
+            f"  {_pad(node_label(name), label_w)}{a['count']:>4}"
+            f"{_rpad(metrics.fmt_ms(a['elapsed_ms']), 10)}{_rpad(share, 7)}"
+            f"{a['llm_calls']:>5}{_rpad(tokens_in, 9)}{_rpad(tokens_out, 8)}"
+        )
+    missing = sum(a["missing_usage"] for a in by_node.values())
+    if missing:
+        lines.append(
+            f"  ※ {missing}件のLLM呼び出しは usage を返しませんでした"
+            "（このプロバイダはトークン数を報告しません）。推定は行いません。")
+    return "\n".join(lines)
+
+
 def run_one(kind, task, profile=None):
     import config
     import graphs
     import llm_profiles
-    from trace_view import format_trace_lines
+    import metrics
+    from trace_view import format_trace_lines, node_label, totals_text
     from executor import _finalize_result
 
     print(f"\n########## {kind} ##########")
@@ -165,11 +251,19 @@ def run_one(kind, task, profile=None):
     final = None
     try:
         # 各ノードの get_llm() がこのプロファイルを使う（executor と同じ形）
-        with config.use_profile(profile):
+        # metrics.collect_run() も executor._agent_steps と同じ位置に置く
+        with config.use_profile(profile), metrics.collect_run():
             for step in app.stream(state):
                 for node, s in step.items():
                     final = s
-                    print(f"  … {node} (step={s.get('step_count')}, status={s.get('status')})",
+                    last = (s.get("trace") or [{}])[-1]
+                    cost = ""
+                    if last.get("elapsed_ms") is not None:
+                        cost = f" {metrics.fmt_ms(last['elapsed_ms'])}"
+                        if last.get("llm_calls"):
+                            cost += f" / {metrics.fmt_tokens(last)}"
+                    print(f"  … {node} (step={s.get('step_count')}, "
+                          f"status={s.get('status')}){cost}",
                           flush=True)
     except Exception as e:
         print(f"\n!! 実行が例外で止まりました: {type(e).__name__}: {e}")
@@ -180,6 +274,9 @@ def run_one(kind, task, profile=None):
     result_text = _finalize_result(final) if final else ""
     print("\n----- ノード遷移 -----")
     print("\n".join(format_trace_lines(final.get("trace", []))))
+    print("\n----- 所要時間とトークン -----")
+    print(format_cost_table(final.get("trace", [])))
+    print(totals_text(final.get("trace", [])))
     print("\n----- 最終結果 -----")
     print(result_text or "(空)")
     print(check_results(kind, final, result_text, elapsed))

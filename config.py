@@ -417,10 +417,23 @@ def invoke_with_retry(llm, messages, max_retries: int = 3):
         "502", "504", "timeout",
     )
 
+    # 計測点。エージェント実行中のLLM呼び出しはすべてここを通るので、
+    # 所要時間とトークンはここ1箇所で拾える（invoke_with_continuation も
+    # 内部でこの関数を呼ぶため、継続分割ぶんも個別に数えられる）。
+    import metrics
+
     last_error = None
+    started = time.monotonic()
     for attempt in range(max_retries + 1):
         try:
-            return llm.invoke(messages)
+            response = llm.invoke(messages)
+            metrics.record_llm(
+                response,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                attempts=attempt + 1,
+                reasoning_tokens=extract_reasoning_tokens(response),
+            )
+            return response
         except Exception as e:
             last_error = e
             error_str = str(e).lower()

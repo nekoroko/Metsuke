@@ -70,6 +70,15 @@ def trace_events(trace: list, start: int) -> list[dict]:
             "summary": entry.get("summary"),
             "note": entry.get("note"),
             "skipped": bool(entry.get("skipped")),
+            # 所要時間とトークン。計測していない実行では入っていないので
+            # そのまま欠測（undefined）として流す。0 を作らない
+            "elapsed_ms": entry.get("elapsed_ms"),
+            "llm_ms": entry.get("llm_ms"),
+            "llm_calls": entry.get("llm_calls"),
+            "input_tokens": entry.get("input_tokens"),
+            "output_tokens": entry.get("output_tokens"),
+            "reasoning_tokens": entry.get("reasoning_tokens"),
+            "missing_usage": entry.get("missing_usage"),
         })
     return out
 

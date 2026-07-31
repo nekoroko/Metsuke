@@ -100,15 +100,16 @@ def run_agent_task(task_id: str, body: RunIn | None = None):
 def _execution_out(row: dict) -> dict:
     """JSON列をパースして返す。フロントで JSON.parse を書かせない。"""
     out = dict(row)
-    for key in ("history", "trace", "llm_info"):
+    for key in ("history", "trace", "llm_info", "metrics"):
+        empty = [] if key in ("history", "trace") else {}
         raw = out.get(key)
         if not raw:
-            out[key] = [] if key != "llm_info" else {}
+            out[key] = empty
             continue
         try:
             out[key] = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            out[key] = [] if key != "llm_info" else {}
+            out[key] = empty
     out["graph_label"] = graphs.run_label(out.get("graph_kind"), out.get("trace"))
     out["model_label"] = llm_profiles.snapshot_label(out.get("llm_info"))
     # ステップ予算はグラフごとに違う（ReAct 10 / リサーチ 18）。画面で

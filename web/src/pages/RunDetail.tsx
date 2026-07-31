@@ -13,6 +13,9 @@ import { api, subscribeRun } from '../api/client'
 import { SplitPane } from '../components/SplitPane'
 import { keys, useExecution, useInvalidate, useLlmProfiles } from '../api/hooks'
 import type { RunEvent, Step, TraceEntry } from '../api/types'
+import {
+  byNode, fmtMs, fmtTokens, hasTokens, llmShare, measured, totalsOf,
+} from '../lib/cost'
 import { Empty, Kicker, Progress, StatusTag, Tag, elapsed, hhmmss } from '../components/ui'
 
 type View = 'timeline' | 'graph' | 'trace'
@@ -83,6 +86,10 @@ export function RunDetailPage() {
 
   const steps: Step[] = live.steps.length ? live.steps : (exec?.steps ?? [])
   const trace: TraceEntry[] = live.trace.length ? live.trace : (exec?.trace ?? [])
+  // 実行中は trace から足す（保存済みの合計はポーリング間隔ぶん遅れる）。
+  // 終了後はどちらでも同じ値になる。
+  const totals = totalsOf(trace)
+  const share = llmShare(totals)
   const stdout = live.stdout ?? exec?.stdout ?? ''
 
   if (!execId) return null
@@ -186,6 +193,35 @@ export function RunDetailPage() {
               <Tag kind="neutral">上限 {Number(exec.llm_info.max_output_tokens).toLocaleString()} tok</Tag>
             )}
           </div>
+          {/* 所要時間とトークン。実行中は届いた trace から足し、
+              終了後は保存済みの合計と一致する */}
+          {(totals.nodes ?? 0) > 0 && (
+            <div className="cost-summary">
+              <div className="cost-cell">
+                <div className="cost-key">所要</div>
+                <div className="cost-val mono">{fmtMs(totals.elapsed_ms)}</div>
+                <div className="cost-sub">
+                  {share === null ? '—' : `LLM待ち ${share}%`}
+                </div>
+              </div>
+              <div className="cost-cell">
+                <div className="cost-key">トークン</div>
+                <div className="cost-val mono">
+                  {hasTokens(totals)
+                    ? `${fmtTokens(totals.input_tokens)} / ${fmtTokens(totals.output_tokens)}`
+                    : '未報告'}
+                </div>
+                <div className="cost-sub">
+                  {hasTokens(totals) ? 'in / out' : 'このモデルは使用量を返しません'}
+                </div>
+              </div>
+              <div className="cost-cell">
+                <div className="cost-key">LLM呼び出し</div>
+                <div className="cost-val mono">{totals.llm_calls ?? 0}</div>
+                <div className="cost-sub">{totals.nodes} ノード</div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -468,7 +504,14 @@ function GraphView({ trace, kind }: { trace: TraceEntry[]; kind: string | null }
   )
 }
 
-/** トレース（1f）。所要時間は持っていないので、ステップ順の帯で見せる。 */
+/**
+ * トレース（1f）。帯の長さは**実際の所要時間**。
+ *
+ * 以前はステップ順を等分した見せかけの帯だった（所要時間を持って
+ * いなかったため）。いまは計測しているので、長い帯＝実際に時間を
+ * 食ったノードとして読める。計測より前に走った実行は elapsed_ms を
+ * 持たないので、その場合だけ従来の等分表示に落とす。
+ */
 function TraceView({ trace, steps }: { trace: TraceEntry[]; steps: Step[] }) {
   if (!trace.length) return <Empty message="ノード遷移がまだ記録されていません。" />
   const total = trace.length
@@ -476,6 +519,12 @@ function TraceView({ trace, steps }: { trace: TraceEntry[]; steps: Step[] }) {
   const actions = steps.filter((s) => s.action).length
   const retries = trace.filter((t) => t.next === 'react' && t.node !== 'react').length
   const skipped = trace.filter((t) => t.skipped).length
+
+  const timed = measured(trace)
+  const hasTiming = timed.length > 0
+  const slowest = Math.max(1, ...timed.map((t) => t.elapsed_ms || 0))
+  const rows = byNode(trace)
+  const totals = totalsOf(trace)
 
   return (
     <>
@@ -485,24 +534,83 @@ function TraceView({ trace, steps }: { trace: TraceEntry[]; steps: Step[] }) {
         <Tag kind="accent">↩ 差し戻し {retries}</Tag>
         <Tag kind="outline">素通り {skipped}</Tag>
       </div>
-      {trace.map((t, i) => {
-        const retry = t.next === 'react' && t.node !== 'react'
-        const width = Math.max(6, Math.round((1 / total) * 100 * 3))
-        return (
-          <div className="trace-row" key={i}>
-            <div className="trace-label">{t.node}</div>
-            <div className="trace-track">
-              <div
-                className={`trace-bar${retry ? ' retry' : t.node === 'react' ? '' : ' tool'}`}
-                style={{ left: `${Math.round((i / total) * 100)}%`, width: `${width}%` }}
-              />
-            </div>
-            <div className="trace-secs">#{t.seq ?? i + 1}</div>
+
+      {hasTiming && (
+        <>
+          <Kicker>ノード別の内訳</Kicker>
+          <div className="table-scroll" style={{ margin: '6px 0 18px' }}>
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>ノード</th>
+                  <th style={{ textAlign: 'right' }}>回</th>
+                  <th style={{ textAlign: 'right' }}>所要</th>
+                  <th style={{ textAlign: 'right' }}>占有</th>
+                  <th style={{ textAlign: 'right' }}>LLM</th>
+                  <th style={{ textAlign: 'right' }}>in</th>
+                  <th style={{ textAlign: 'right' }}>out</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.node}>
+                    <td className="cell-nowrap">{r.node}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{r.count}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{fmtMs(r.elapsed_ms)}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{r.share}%</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{r.llm_calls || '—'}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>
+                      {r.input_tokens ? fmtTokens(r.input_tokens) : '—'}
+                    </td>
+                    <td className="mono" style={{ textAlign: 'right' }}>
+                      {r.output_tokens ? fmtTokens(r.output_tokens) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )
-      })}
+          {(totals.missing_usage ?? 0) > 0 && (
+            <div className="notice" style={{ marginBottom: 18 }}>
+              {totals.missing_usage} 件のLLM呼び出しで使用量が返りませんでした。
+              このプロバイダはトークン数を報告しません（推定は行いません）。
+            </div>
+          )}
+        </>
+      )}
+
+      <Kicker>実行順</Kicker>
+      <div style={{ marginTop: 6 }}>
+        {trace.map((t, i) => {
+          const retry = t.next === 'react' && t.node !== 'react'
+          // 計測があれば所要時間に比例、無ければ従来どおり等分
+          const width = hasTiming
+            ? Math.max(2, Math.round(((t.elapsed_ms || 0) / slowest) * 100))
+            : Math.max(6, Math.round((1 / total) * 100 * 3))
+          const left = hasTiming ? 0 : Math.round((i / total) * 100)
+          return (
+            <div className="trace-row" key={i}>
+              <div className="trace-label">{t.node}</div>
+              <div className="trace-track">
+                <div
+                  className={`trace-bar${retry ? ' retry' : t.node === 'react' ? '' : ' tool'}`}
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                />
+              </div>
+              <div className="trace-secs mono" title={
+                t.llm_calls ? `LLM ${t.llm_calls}回 ${fmtMs(t.llm_ms)}` : undefined
+              }>
+                {hasTiming ? fmtMs(t.elapsed_ms) : `#${t.seq ?? i + 1}`}
+              </div>
+            </div>
+          )
+        })}
+      </div>
       <div className="cell-sub" style={{ marginTop: 12 }}>
-        凡例: ink = LLM思考 / グレー = ツール・検索 / アクセント = 差し戻し。
+        {hasTiming
+          ? '帯の長さは実際の所要時間（最長のノードを100%とした比）。'
+          : 'この実行は所要時間を計測していないため、帯はステップ順の目安です。'}
+        {' '}凡例: ink = LLM思考 / グレー = ツール・検索 / アクセント = 差し戻し。
         {total > 0 && ` やり直しが全体の ${Math.round((retries / total) * 100)}%。`}
       </div>
     </>

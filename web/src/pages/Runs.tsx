@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { useExecutions } from '../api/hooks'
 import { Empty, StatusTag, Tag } from '../components/ui'
+import { fmtMs, fmtTokens, hasTokens } from '../lib/cost'
 
 type Filter = 'all' | 'running' | 'done' | 'error'
 
@@ -53,6 +54,10 @@ export function RunsPage() {
                 <th>実行方式</th>
                 <th>モデル</th>
                 <th>状態</th>
+                {/* 所要とトークンは executions.metrics（合計）から出す。
+                    ここで trace を読むと一覧の転送量が跳ねる */}
+                <th style={{ textAlign: 'right' }}>所要</th>
+                <th style={{ textAlign: 'right' }}>トークン</th>
                 <th>開始</th>
                 <th>完了</th>
               </tr>
@@ -72,6 +77,17 @@ export function RunsPage() {
                     {e.llm_info?.model ?? '—'}
                   </td>
                   <td className="cell-nowrap"><StatusTag status={e.status} /></td>
+                  <td className="cell-nowrap mono" style={{ fontSize: 11, textAlign: 'right' }}>
+                    {typeof e.metrics?.elapsed_ms === 'number' ? fmtMs(e.metrics.elapsed_ms) : '—'}
+                  </td>
+                  <td className="cell-nowrap mono" style={{ fontSize: 11, textAlign: 'right' }}
+                      title={e.metrics?.llm_calls ? `LLM ${e.metrics.llm_calls}回` : undefined}>
+                    {e.metrics && hasTokens(e.metrics)
+                      ? `${fmtTokens(e.metrics.input_tokens)} / ${fmtTokens(e.metrics.output_tokens)}`
+                      : e.metrics?.llm_calls
+                        ? '未報告'
+                        : '—'}
+                  </td>
                   <td className="cell-nowrap mono" style={{ fontSize: 11 }}>
                     {e.started_at.slice(0, 19).replace('T', ' ')}
                   </td>

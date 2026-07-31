@@ -48,6 +48,29 @@ export interface TraceEntry {
   summary?: string
   note?: string
   skipped?: boolean
+  // 所要時間とトークン。計測より前に走った実行では undefined。
+  // 「計測していない」と「0だった」は別物なので 0 で埋めない。
+  elapsed_ms?: number
+  llm_ms?: number
+  llm_calls?: number
+  input_tokens?: number
+  output_tokens?: number
+  reasoning_tokens?: number
+  missing_usage?: number
+}
+
+/** 実行全体の合計。db の executions.metrics 列。 */
+export interface RunMetrics {
+  nodes?: number
+  elapsed_ms?: number
+  llm_ms?: number
+  llm_calls?: number
+  llm_attempts?: number
+  input_tokens?: number
+  output_tokens?: number
+  reasoning_tokens?: number
+  missing_usage?: number
+  tokens_reported?: boolean
 }
 
 export interface LlmInfo {
@@ -72,6 +95,7 @@ export interface Execution {
   stderr: string | null
   history: unknown[]
   trace: TraceEntry[]
+  metrics: RunMetrics
   llm_info: LlmInfo
   graph_kind: string | null
   graph_label: string

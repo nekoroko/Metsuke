@@ -100,6 +100,12 @@ def init_db():
     # api_key は入れない（llm_profiles.SNAPSHOT_FIELDS を参照）
     if "llm_info" not in exec_cols:
         conn.execute("ALTER TABLE executions ADD COLUMN llm_info TEXT")
+    # 所要時間とトークンの合計（JSON）。ノード別の内訳は trace に入っている。
+    # 合計を別列に持つのは、一覧画面が trace を読まずに済むようにするため
+    # （一覧で history/trace まで転送するのをやめる予定があり、そのとき
+    #  合計を trace から計算していると一覧から数字が消える）。
+    if "metrics" not in exec_cols:
+        conn.execute("ALTER TABLE executions ADD COLUMN metrics TEXT")
 
     # AI生成セッション
     conn.execute("""
@@ -554,13 +560,15 @@ def set_execution_graph_kind(exec_id: str, graph_kind: str):
     conn.commit()
     conn.close()
 
-def update_execution_progress(exec_id: str, history: list, trace: list = None):
+def update_execution_progress(exec_id: str, history: list, trace: list = None,
+                              metrics: dict = None):
     """実行中の履歴とノード遷移を逐次更新する（バックグラウンド実行の進捗用）"""
     conn = get_connection()
     conn.execute(
-        "UPDATE executions SET history = ?, trace = ? WHERE id = ?",
+        "UPDATE executions SET history = ?, trace = ?, metrics = ? WHERE id = ?",
         (json.dumps(history, ensure_ascii=False) if history else None,
          json.dumps(trace, ensure_ascii=False) if trace else None,
+         json.dumps(metrics, ensure_ascii=False) if metrics else None,
          exec_id)
     )
     conn.commit()
@@ -572,7 +580,8 @@ def get_execution(exec_id: str) -> dict | None:
     conn.close()
     return dict(row) if row else None
 
-def finish_execution(exec_id, status, stdout="", stderr="", history=None, trace=None):
+def finish_execution(exec_id, status, stdout="", stderr="", history=None, trace=None,
+                     metrics=None):
     """
     実行を終了状態にする。
 
@@ -589,6 +598,9 @@ def finish_execution(exec_id, status, stdout="", stderr="", history=None, trace=
     if trace is not None:
         sets.append("trace=?")
         vals.append(json.dumps(trace, ensure_ascii=False))
+    if metrics is not None:
+        sets.append("metrics=?")
+        vals.append(json.dumps(metrics, ensure_ascii=False))
     sets.append("finished_at=?")
     vals.append(datetime.now().isoformat())
 

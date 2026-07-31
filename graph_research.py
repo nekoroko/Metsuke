@@ -30,7 +30,8 @@ from numeric import (
     ORIGIN_SOURCE, ORIGIN_INTERNAL, internal_texts,
 )
 from graph import (
-    _with_trace, correct_step, critic_step, SECTIONS_ALWAYS, SECTIONS_WRITE,
+    _with_trace, correct_step, critic_step, measured,
+    SECTIONS_ALWAYS, SECTIONS_WRITE,
 )
 from datetime import datetime
 
@@ -879,7 +880,7 @@ ENTRY_POINT = "plan"
 
 workflow = StateGraph(AgentState)
 for _name, _fn in NODES.items():
-    workflow.add_node(_name, _fn)
+    workflow.add_node(_name, measured(_name, _fn))
 workflow.set_entry_point(ENTRY_POINT)
 for _name, (_router, _targets) in ROUTES.items():
     mapping = {t: t for t in _targets}

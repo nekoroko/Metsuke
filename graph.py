@@ -8,6 +8,7 @@ from sandbox import execute_in_sandbox, PROFILE_AGENT_CODE
 from reviewers import (
     dispatch_reviewers, run_reviewers, aggregate_results, numeric_checker,
 )
+import metrics
 from parsing import (
     parse_done, extract_done, extract_previous_done, find_done_entry,
     replace_done_body,
@@ -87,7 +88,26 @@ def _with_trace(prev_state: dict, out: dict, node: str, summary: str,
         "correction_count": out.get("correction_count", prev_state.get("correction_count", 0)),
         "tool_verify_count": out.get("tool_verify_count", prev_state.get("tool_verify_count", 0)),
     }
+    # 所要時間とトークンを混ぜる。計測していない経路（テストや、
+    # collect_run で囲っていない呼び出し）では空なので何も増えない。
+    entry.update(metrics.take_node())
     return {**out, "trace": prev + [entry]}
+
+
+def measured(name: str, fn):
+    """
+    ノードを計測でくるむ。ノード本体には手を入れない。
+
+    出口の _with_trace が take_node() で締めるので、ここでは入口の
+    印をつけるだけでよい。
+    """
+    def wrapped(state):
+        metrics.begin_node()
+        return fn(state)
+
+    wrapped.__name__ = getattr(fn, "__name__", name)
+    wrapped.__doc__ = getattr(fn, "__doc__", None)
+    return wrapped
 
 
 def _findings_section(findings: list) -> str:
@@ -1220,10 +1240,10 @@ def route_after_critic(state: AgentState) -> str:
 
 
 workflow = StateGraph(AgentState)
-workflow.add_node("react", react_step)
-workflow.add_node("critic", critic_step)
-workflow.add_node("verify_tool", verify_tool_step)
-workflow.add_node("correct", correct_step)
+workflow.add_node("react", measured("react", react_step))
+workflow.add_node("critic", measured("critic", critic_step))
+workflow.add_node("verify_tool", measured("verify_tool", verify_tool_step))
+workflow.add_node("correct", measured("correct", correct_step))
 workflow.set_entry_point("react")
 workflow.add_conditional_edges(
     "react", route_after_react,

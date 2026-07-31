@@ -531,7 +531,38 @@ table.grid tbody tr:hover { background: color-mix(in srgb, var(--color-text) 4%,
 .trace-bar { position: absolute; top: 0; bottom: 0; background: var(--color-text); }
 .trace-bar.tool { background: var(--color-neutral-700); }
 .trace-bar.retry { background: var(--color-accent); }
-.trace-secs { width: 52px; text-align: right; font: 500 10.5px 'Roboto Mono', ui-monospace, monospace; opacity: .6; }
+.trace-secs { width: 58px; text-align: right; font: 500 10.5px 'Roboto Mono', ui-monospace, monospace; opacity: .6; }
+
+/* 所要時間とトークンの要約。実行詳細の左ペイン（メタ情報）に置く */
+.cost-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin-top: 12px;
+  background: var(--color-divider);
+  border: 2px solid var(--color-divider);
+}
+.cost-cell { background: var(--color-bg); padding: 8px 9px; min-width: 0; }
+.cost-key {
+  font: 400 9.5px 'Roboto Mono', ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  opacity: .55;
+}
+.cost-val {
+  margin-top: 3px;
+  font: 600 13px 'Roboto Mono', ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+.cost-sub {
+  margin-top: 2px;
+  font: 400 10px var(--font-body);
+  opacity: .55;
+  overflow-wrap: anywhere;
+}
+
+/* 幅の広い表は、ページ全体ではなく表だけ横スクロールさせる */
+.table-scroll { overflow-x: auto; max-width: 100%; }
 
 /* ステートマシン */
 .sm-row { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }

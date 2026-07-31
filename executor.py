@@ -13,6 +13,7 @@ from state import make_initial_state  # noqa: F401  （外部から参照され�
 import config
 import graphs
 import llm_profiles
+import metrics
 
 WORKSPACE = "/tmp/agent_workspace"
 
@@ -49,11 +50,36 @@ def _agent_steps(agent_app, initial_state, profile):
     「今どのモデルか」を立てておく必要がある。3つの実行経路それぞれで
     with を書くと、どれか1つで書き漏らしたときに黙って既定のモデルで
     走ってしまう。回すところを1箇所に寄せる。
+
+    計測（metrics）も同じ理由でここに置く。3経路それぞれで囲うと、
+    どれか1つで書き漏らして「その経路だけトークンが0」になる。
     """
-    with config.use_profile(profile):
+    with config.use_profile(profile), metrics.collect_run():
         for step in agent_app.stream(initial_state):
             for node_name, state in step.items():
                 yield node_name, state
+
+
+def run_totals(final_state: dict = None) -> dict:
+    """
+    実行全体の合計。trace から足す。
+
+    集計器（collect_run のスコープ）は _agent_steps を抜けた時点で
+    畳まれているので、保存時には trace が唯一の情報源になる。
+    trace は毎ノード追記されるので、実行中の途中経過にも同じ関数が使える。
+    """
+    trace = (final_state or {}).get("trace") or []
+    keys = ("elapsed_ms", "llm_ms", "llm_calls", "llm_attempts",
+            "input_tokens", "output_tokens", "reasoning_tokens", "missing_usage")
+    out = {k: 0 for k in keys}
+    out["nodes"] = len(trace)
+    for entry in trace:
+        for k in keys:
+            value = entry.get(k)
+            if isinstance(value, int):
+                out[k] += value
+    out["tokens_reported"] = out["llm_calls"] > 0 and out["missing_usage"] == 0
+    return out
 
 
 def _extract_done_text(history: list) -> str:
@@ -168,6 +194,7 @@ def run_agent(task_id: str, task_name: str, task_prompt: str,
             stdout=result_text,
             history=final_state["history"],
             trace=final_state.get("trace"),
+            metrics=run_totals(final_state),
         )
         return {"exec_id": exec_id, "status": final_state["status"],
                 "stdout": result_text, "stderr": ""}
@@ -240,7 +267,8 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None,
         for _node_name, state in _agent_steps(agent_app, initial_state, profile):
             final_state = state
             # 各ステップごとにDBに進捗を保存
-            update_execution_progress(exec_id, state["history"], state.get("trace"))
+            update_execution_progress(exec_id, state["history"], state.get("trace"),
+                                      run_totals(state))
 
         if final_state is None:
             finish_execution(exec_id, "error", stderr="実行結果が空です")
@@ -258,6 +286,7 @@ def run_agent_background(exec_id: str, task_prompt: str, task_id: str = None,
             stdout=result_text,
             history=final_state["history"],
             trace=final_state.get("trace"),
+            metrics=run_totals(final_state),
         )
 
     except Exception as e:
@@ -372,6 +401,7 @@ def run_agent_streaming(task_id: str, task_name: str, task_prompt: str,
                 stdout=result_text,
                 history=final_state["history"],
                 trace=final_state.get("trace"),
+                metrics=run_totals(final_state),
             )
 
     except Exception as e:
